@@ -1,0 +1,212 @@
+# Skye Assistant Project - Cursor Rules
+
+You are an expert in TypeScript, Node.js, React, Vite, WebSocket communication, Firebase Authentication, and OpenAI integration for real-time voice applications.
+
+## Project Context
+- **Backend**: Node.js + TypeScript WebSocket server with Firebase Admin SDK, Zep Cloud memory, OpenAI Realtime API
+- **Frontend**: React + Vite + TypeScript with Firebase Auth, WebRTC/MediaRecorder for audio capture
+- **Real-time**: WebSocket communication for voice streaming and AI responses
+- **Authentication**: Firebase Auth with JWT tokens
+- **AI Integration**: OpenAI GPT-4o-mini Realtime API, Zep Cloud for persistent memory
+
+## Core Development Principles
+
+### Code Style and Structure
+- Write concise, technical TypeScript code with accurate examples
+- Use functional and declarative programming patterns; avoid classes
+- Prefer iteration and modularization over code duplication
+- Use descriptive variable names with auxiliary verbs (e.g., isLoading, hasError, isConnected, hasSession)
+- Structure files: exported component, subcomponents, helpers, static content, types
+
+### TypeScript Usage
+- Use TypeScript for all code; prefer interfaces over types for object shapes
+- Avoid enums; use literal types or const objects instead
+- Use functional components with TypeScript interfaces for props
+- Enable strict mode and handle all error cases explicitly
+- Use proper typing for WebSocket events and Firebase user objects
+
+### File Organization
+- Use lowercase with dashes for directories (e.g., `components/voice-interface`)
+- Favor named exports for components
+- Place types in dedicated files (e.g., `types/websocket-types.ts`, `types/firebase-types.ts`)
+- Organize by feature: `components/`, `hooks/`, `services/`, `utils/`, `types/`
+
+## WebSocket & Real-time Communication
+
+### WebSocket Best Practices
+- Always handle connection states: `connecting`, `connected`, `disconnected`, `error`
+- Implement proper reconnection logic with exponential backoff
+- Use typed message interfaces for WebSocket communication
+- Handle WebSocket cleanup in useEffect cleanup functions
+- Implement heartbeat/ping-pong for connection health monitoring
+
+```typescript
+interface WebSocketMessage {
+  type: 'auth' | 'start_session' | 'audio_data' | 'stop_session';
+  data?: any;
+}
+
+interface VoiceSession {
+  isConnected: boolean;
+  isAuthenticated: boolean;
+  sessionId: string | null;
+  error: string | null;
+}
+```
+
+### Audio Handling
+- Use proper MediaRecorder configuration for WebRTC audio capture
+- Implement proper audio format handling (PCM16 for OpenAI)
+- Handle audio permissions and device access gracefully
+- Implement audio visualization and feedback for user experience
+- Use proper cleanup for MediaRecorder and audio contexts
+
+## Firebase Integration
+
+### Authentication Patterns
+- Use Firebase Auth with ID token verification
+- Implement proper token refresh logic
+- Handle authentication state changes reactively
+- Use Firebase Admin SDK for server-side token verification
+- Store user context securely and pass via WebSocket after verification
+
+```typescript
+interface AuthenticatedUser {
+  uid: string;
+  email: string;
+  authenticated: boolean;
+  sessionId: string;
+}
+```
+
+### Security Best Practices
+- Always verify Firebase ID tokens on the server
+- Implement proper CORS configuration
+- Sanitize all user inputs
+- Use environment variables for all API keys and secrets
+- Never expose sensitive credentials to the frontend
+
+## OpenAI Integration
+
+### Realtime API Patterns
+- Use proper session configuration for OpenAI Realtime API
+- Implement error handling for API rate limits and connection issues
+- Handle audio streaming with proper buffering
+- Use appropriate voice models and settings
+- Implement conversation memory with Zep Cloud integration
+
+### Voice Configuration
+- Use supported OpenAI voices: `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`
+- Configure proper audio formats: `pcm16` for input/output
+- Set appropriate temperature and response length limits
+- Implement proper turn detection and conversation flow
+
+## React & Frontend Best Practices
+
+### Component Patterns
+- Use functional components with proper TypeScript interfaces
+- Implement proper loading states and error boundaries
+- Use custom hooks for WebSocket, audio, and authentication logic
+- Implement proper component composition and reusability
+- Use React.memo() for performance optimization where appropriate
+
+### State Management
+- Use useState for local component state
+- Use useContext for shared authentication state
+- Use custom hooks for complex stateful logic (WebSocket, audio recording)
+- Avoid prop drilling; prefer context for deeply nested props
+- Implement proper state cleanup in useEffect
+
+### Error Handling
+- Implement comprehensive error boundaries
+- Handle async errors in try-catch blocks
+- Provide user-friendly error messages
+- Log errors appropriately for debugging
+- Implement retry mechanisms for transient failures
+
+## Performance Optimization
+
+### Frontend Performance
+- Optimize bundle size with proper code splitting
+- Use lazy loading for non-critical components
+- Implement proper memo strategies for expensive computations
+- Optimize re-renders with proper dependency arrays
+- Use proper cleanup for timers, listeners, and subscriptions
+
+### Backend Performance
+- Implement proper WebSocket connection pooling
+- Use efficient JSON parsing and stringification
+- Implement proper memory management for audio streams
+- Use appropriate async/await patterns
+- Implement proper logging without performance impact
+
+## Development Workflow
+
+### Environment Configuration
+- Use `.env.local` for local development environment variables
+- Use proper environment variable validation
+- Implement proper configuration management for different environments
+- Use TypeScript for configuration objects with proper typing
+
+### Testing Considerations
+- Test WebSocket connection handling and edge cases
+- Test audio recording and playback functionality
+- Test Firebase authentication flows
+- Test error handling and recovery scenarios
+- Implement integration tests for critical user flows
+
+### Debugging Patterns
+- Use proper console logging with structured data
+- Implement WebSocket message logging for debugging
+- Use browser developer tools for audio debugging
+- Implement proper error tracking and monitoring
+- Use TypeScript strict mode to catch errors early
+
+## API Integration Guidelines
+
+### OpenAI API Usage
+- Handle API rate limits gracefully
+- Implement proper request/response logging
+- Use appropriate model parameters for voice applications
+- Handle streaming responses properly
+- Implement proper error recovery for API failures
+
+### Zep Cloud Memory Integration
+- Implement proper user session management
+- Handle memory storage and retrieval efficiently
+- Use appropriate memory search and filtering
+- Implement proper error handling for memory operations
+- Maintain conversation context across sessions
+
+### Firebase Services
+- Use Firebase Admin SDK properly on the server
+- Implement proper user management and authentication
+- Handle Firebase service account credentials securely
+- Use appropriate Firebase security rules
+- Implement proper error handling for Firebase operations
+
+## Common Patterns to Follow
+
+1. **Always implement proper TypeScript typing**
+2. **Use async/await consistently with proper error handling**
+3. **Implement proper cleanup for all subscriptions and connections**
+4. **Use environment variables for all configuration**
+5. **Handle edge cases and error scenarios explicitly**
+6. **Implement proper logging for debugging and monitoring**
+7. **Use proper component composition and reusability patterns**
+8. **Implement responsive design with mobile-first approach**
+9. **Use proper accessibility attributes for audio controls**
+10. **Follow security best practices for real-time applications**
+
+## Anti-patterns to Avoid
+
+1. **Don't use 'any' type; use proper TypeScript typing**
+2. **Don't forget WebSocket cleanup in useEffect**
+3. **Don't expose API keys or sensitive data to frontend**
+4. **Don't implement custom WebSocket reconnection without exponential backoff**
+5. **Don't use synchronous operations for audio processing**
+6. **Don't forget to handle authentication state changes**
+7. **Don't implement audio recording without proper permissions handling**
+8. **Don't use console.log in production; use proper logging**
+9. **Don't ignore OpenAI API rate limits and error responses**
+10. **Don't implement real-time features without proper error boundaries** 

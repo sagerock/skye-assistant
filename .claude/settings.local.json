@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npm init:*)",
+      "Bash(cp:*)",
+      "Bash(npx ts-node:*)",
+      "Bash(npm run dev:*)",
+      "Bash(npx:*)",
+      "Bash(ls:*)",
+      "Bash(rm:*)",
+      "Bash(./node_modules/.bin/vite)",
+      "Bash(npm cache clean:*)",
+      "Bash(curl:*)",
+      "Bash(node:*)",
+      "Bash(PORT=3002 node src/server.js)",
+      "Bash(ping:*)",
+      "Bash(timeout:*)",
+      "Bash(pkill:*)",
+      "Bash(PORT=8080 node src/working-ai-server.js)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:openai.com)",
+      "Bash(cd:*)",
+      "Bash(cd:*)",
+      "WebFetch(domain:openai.github.io)"
+    ],
+    "deny": []
+  }
+}

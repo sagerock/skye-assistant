@@ -1,0 +1,26 @@
+# Environment files
+.env
+.env.*
+.env copy
+
+# Firebase and credentials
+firebase-credentials.json
+skye-assistant-credentials.json
+*-credentials.json
+serviceAccountKey.json
+
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+temp/
+*.tmp
+*.copy 
