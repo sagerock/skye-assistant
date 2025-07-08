@@ -79,7 +79,7 @@ zepClient = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
 
 **Problem**: Using unsupported voice
 ```bash
-Invalid value: 'nova'. Supported values are: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', and 'verse'.
+Invalid value: 'nova'. Supported values are: 'alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse'.
 ```
 
 **Solution**: Use only supported voices
@@ -91,9 +91,240 @@ const SUPPORTED_VOICES = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'sh
 const voice = SUPPORTED_VOICES.includes(selectedVoice) ? selectedVoice : 'alloy';
 ```
 
+### 5. **Zep Memory Integration - "Cannot read properties of undefined" Error**
+
+**Problem**: Zep client initialization and conversation storage failing
+```bash
+TypeError: Cannot read properties of undefined (reading 'addMemory')
+zepClient.memory.addMemory is not a function
+```
+
+**Root Cause**: Multiple issues with Zep Cloud SDK integration:
+1. Incorrect client initialization timing (before authentication)
+2. Wrong memory API method usage (`addMemory` vs `add`)
+3. Improper session/user ID handling
+4. Missing async/await error handling
+
+**Solution**: Complete Zep integration overhaul
+```javascript
+// ✅ Correct Zep client initialization (after user auth)
+if (user?.uid && !zepClient) {
+  zepClient = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
+  console.log('✅ Zep client initialized for user:', user.uid);
+}
+
+// ✅ Correct memory storage method
+try {
+  await zepClient.memory.add(user.uid, {
+    messages: conversationHistory,
+    metadata: { timestamp: new Date().toISOString() }
+  });
+  console.log('💾 Stored conversation in Zep for user', user.uid);
+} catch (error) {
+  console.error('❌ Failed to store in Zep:', error);
+}
+
+// ✅ Proper conversation history tracking
+const conversationHistory = [];
+// Track both user input and AI responses
+if (transcript) {
+  conversationHistory.push({
+    role: 'user',
+    content: transcript
+  });
+}
+if (aiResponse) {
+  conversationHistory.push({
+    role: 'assistant', 
+    content: aiResponse
+  });
+}
+```
+
+**Key Fixes Applied**:
+1. **Lazy initialization**: Zep client created only after user authentication
+2. **Correct API usage**: `zepClient.memory.add()` instead of `addMemory()`
+3. **Proper session management**: Using Firebase user UID as session identifier
+4. **Conversation tracking**: Collecting both user transcripts and AI responses
+5. **Error handling**: Try-catch blocks around all Zep operations
+6. **Timing fixes**: Store memories after conversation completion, not during
+
+**Prevention**:
+- Always initialize Zep client after user authentication
+- Use the correct Zep Cloud SDK API methods (check latest documentation)
+- Implement proper error handling for all external service calls
+- Test memory storage with actual conversation data
+
+**Success Indicators**:
+- ✅ `💾 Stored conversation in Zep for user [user-id]` in server logs
+- ✅ No Zep-related errors during conversation
+- ✅ Conversation history properly accumulated before storage
+
+### 6. **Zep User ID Inconsistency - "New User Created Every Login"**
+
+**Problem**: New Zep user created on each login instead of using persistent Firebase UID
+```
+Zep Dashboard shows multiple users like:
+zep_057f84598f59f09fef06754221623876d689384ef05ebae259b2f6f28eb2b72d
+zep_1c5f98144b29138d7fd495bfc57128df20577b020507b7d935a52328c5d28e91
+```
+
+**Root Cause**: Using dynamic `sessionId` instead of consistent Firebase UID as Zep user identifier
+```javascript
+// ❌ Wrong - creates new user each time
+userSession.sessionId = `session_${decodedToken.uid}_${Date.now()}`;
+await zepClient.memory.add(sessionId, { messages });  // sessionId changes!
+
+// ❌ Also wrong - using sessionId for user lookup
+const memory = await zepClient.memory.get(sessionId, { lastn: 10 });
+```
+
+**Solution**: Use Firebase UID consistently as Zep user identifier
+```javascript
+// ✅ Correct - use consistent Firebase UID
+await zepClient.memory.add(userId, { 
+  messages: messages,
+  metadata: {
+    sessionId: sessionId,  // sessionId as metadata only
+    timestamp: new Date().toISOString()
+  }
+});
+
+// ✅ Correct - get memories by Firebase UID
+const memory = await zepClient.memory.get(userId, { lastn: 10 });
+
+// ✅ Correct - proper role assignment
+const messages = [{
+  role: 'user',        // Standard role name
+  roleType: 'user',
+  content: userMessage
+}, {
+  role: 'assistant',   // Standard role name
+  roleType: 'assistant',
+  content: assistantMessage
+}];
+```
+
+**Key Changes Made**:
+1. **Consistent User ID**: Firebase UID used as Zep user identifier instead of changing sessionId
+2. **Proper API Usage**: `zepClient.memory.add(userId, ...)` instead of `add(sessionId, ...)`
+3. **Memory Retrieval**: `zepClient.memory.get(userId, ...)` for consistent history access
+4. **Session Metadata**: sessionId stored as metadata for tracking, not as primary identifier
+5. **Standard Roles**: Using 'user' and 'assistant' instead of custom role names
+
+**Prevention**:
+- Always use persistent user identifiers (Firebase UID) for external services
+- Keep session identifiers separate from user identifiers
+- Test memory persistence across multiple login sessions
+- Monitor Zep dashboard to verify single user per person
+
+**Success Indicators**:
+- ✅ Same Zep user ID appears for repeated logins by same Firebase user
+- ✅ `👤 Existing Zep user found: [firebase-uid]` in logs for returning users
+- ✅ `👤 Created new Zep user with Firebase UID: [firebase-uid]` only on first login
+- ✅ Conversation history carries over between sessions
+- ✅ Zep dashboard shows single user per Firebase account
+
+### 7. **Zep Cloud Session Auto-Generation - "Sessions Creating New Users"**
+
+**Problem**: Zep Cloud automatically creating session-based users instead of using explicitly created Firebase UID users
+```
+Zep Dashboard showing:
+- User ID: zep_a103c033ca3002a93a20325e9e51bd331d069bdd27b52bb1 (auto-generated hash)
+- Session ID: uxS93DlkVCRmqf5UjSGjL4gwUED3 (our Firebase UID!)
+- Email: Empty (not being set)
+
+Memory was being stored under the hash ID user, not the Firebase UID user.
+```
+
+**Root Cause**: Zep Cloud's automatic session management behavior
+- When `memory.add(sessionId, {...})` is called without explicit user-session linking
+- Zep automatically creates a new user with a hash ID for that session
+- The Firebase UID becomes the session ID instead of the user ID
+- This bypasses our explicit user creation and email management
+
+**Solution**: Implement explicit user-session linking pattern
+```javascript
+// ✅ CRITICAL: Add session to user explicitly BEFORE storing memory
+async function ensureUserSession(userId, sessionId, userSession = {}) {
+  // ... existing user creation/validation code ...
+  
+  // CRITICAL: Explicitly add session to the user to ensure proper linking
+  try {
+    console.log(`🔗 Adding session ${sessionId} to user ${userId}...`);
+    await zepClient.memory.addSession({
+      userId: userId,
+      sessionId: sessionId,
+      metadata: {
+        firebase_uid: userId,
+        user_email: userSession.email || 'unknown',
+        created_at: new Date().toISOString()
+      }
+    });
+    console.log(`✅ Session ${sessionId} successfully linked to user ${userId}`);
+  } catch (sessionError) {
+    if (sessionError.message.includes('already exists')) {
+      console.log(`ℹ️ Session ${sessionId} already exists for user ${userId}`);
+    } else {
+      console.error(`❌ Failed to add session: ${sessionError.message}`);
+    }
+  }
+}
+
+// ✅ THEN store memory using the session (which is now linked to correct user)
+await zepClient.memory.add(sessionId, {
+  messages: messages,
+  metadata: {
+    sessionId: sessionId,
+    timestamp: new Date().toISOString(),
+    firebase_uid: userId,
+    user_email: userSession?.email || 'unknown'
+  }
+});
+```
+
+**Key Technical Details**:
+1. **Zep Cloud Behavior**: If a session isn't explicitly linked to a user, Zep auto-creates a user for that session
+2. **Session-User Relationship**: Must use `memory.addSession()` to explicitly link sessions to existing users
+3. **API Call Order**: User creation → Session linking → Memory storage
+4. **Verification**: Check that `memory.get(sessionId)` returns `user_id` matching your Firebase UID
+
+**Race Condition Prevention**:
+```javascript
+// Added user creation locks to prevent duplicate user creation
+const userCreationLocks = new Set();
+
+if (userCreationLocks.has(userId)) {
+  console.log(`⏳ User creation already in progress for ${userId}, waiting...`);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  return;
+}
+userCreationLocks.add(userId);
+// ... user creation logic ...
+userCreationLocks.delete(userId);
+```
+
+**Success Indicators**:
+- ✅ `🔗 Adding session [session-id] to user [firebase-uid]...` in logs
+- ✅ `✅ Session [session-id] successfully linked to user [firebase-uid]` in logs
+- ✅ Zep dashboard shows Firebase UID as User ID (not hash)
+- ✅ User email properly populated in Zep dashboard
+- ✅ Multiple sessions linked to single user (not creating new users per session)
+- ✅ `✅ CORRECT: Session linked to Firebase UID [uid]` in verification logs
+
+**Before Fix**: 
+- 3 users created (2 hash IDs + 1 Firebase UID)
+- Hash ID users had conversations
+- Firebase UID user was empty
+
+**After Fix**:
+- 1 user (Firebase UID with email)
+- Multiple sessions properly linked to that user
+- All conversations stored under correct user
+
 ## 🔧 Environment Issues
 
-### 5. **Firebase Authentication - "api-key-not-valid"**
+### 8. **Firebase Authentication - "api-key-not-valid"**
 
 **Problem**: Accessing static HTML with wrong Firebase config
 
@@ -111,7 +342,7 @@ cd frontend && npm run dev
 # Access: http://localhost:5173 (NOT static HTML files)
 ```
 
-### 6. **Missing Environment Variables**
+### 9. **Missing Environment Variables**
 
 **Problem**: Services fail to initialize
 
@@ -145,7 +376,7 @@ pkill -f "realtime-server"
 ```
 
 **2. Start backend**:
-```bash
+```bashs
 cd backend
 node src/realtime-server.js
 ```

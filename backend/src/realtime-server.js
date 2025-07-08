@@ -20,8 +20,14 @@ initializeApp({
 // Initialize Zep Cloud client
 let zepClient = null;
 if (process.env.ZEP_API_KEY) {
-  zepClient = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
-  console.log('✅ Zep Cloud initialized for persistent memory');
+  try {
+    zepClient = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
+    console.log('✅ Zep Cloud initialized for persistent memory');
+    console.log(`🔑 Zep API Key: ${process.env.ZEP_API_KEY.substring(0, 10)}...`);
+  } catch (error) {
+    console.error('❌ Failed to initialize Zep Cloud client:', error.message);
+    zepClient = null;
+  }
 } else {
   console.warn('⚠️  ZEP_API_KEY not found. Memory features will be disabled.');
 }
@@ -36,6 +42,9 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+
+// User creation lock to prevent race conditions
+const userCreationLocks = new Set();
 
 console.log('🚀 Initializing GPT-4o Mini Realtime Server...');
 
@@ -125,7 +134,7 @@ wss.on('connection', (clientWs) => {
       // Initialize or get user's conversation session in Zep
       if (zepClient) {
         try {
-          await ensureUserSession(userSession.uid, userSession.sessionId);
+          await ensureUserSession(userSession.uid, userSession.sessionId, userSession);
         } catch (error) {
           console.warn('Warning: Could not initialize Zep session:', error.message);
         }
@@ -143,62 +152,147 @@ wss.on('connection', (clientWs) => {
     }
   }
 
-  async function ensureUserSession(userId, sessionId) {
+  async function ensureUserSession(userId, sessionId, userSession = {}) {
     if (!zepClient) return;
     
+    // Check if user creation is already in progress for this user
+    if (userCreationLocks.has(userId)) {
+      console.log(`⏳ User creation already in progress for ${userId}, waiting...`);
+      // Wait a bit and try again
+      await new Promise(resolve => setTimeout(resolve, 100));
+      if (userCreationLocks.has(userId)) {
+        console.log(`⏳ Still waiting for user creation for ${userId}, skipping...`);
+        return;
+      }
+    }
+    
     try {
-      // Try to get existing user
-      await zepClient.user.get(userId);
-      console.log(`👤 User already exists: ${userId}`);
-    } catch (error) {
-      // User doesn't exist, create them
-      if (error.message.includes('404') || error.message.includes('not found')) {
+      // Try to get existing user by Firebase UID
+      console.log(`🔍 Checking if Zep user exists: ${userId}`);
+      const existingUser = await zepClient.user.get(userId);
+      console.log(`👤 Existing Zep user found: ${userId}`);
+      console.log(`📋 User details:`, JSON.stringify(existingUser, null, 2));
+      
+      // Update user with email if not already set
+      if (userSession.email && (!existingUser.email || existingUser.email !== userSession.email)) {
         try {
-          await zepClient.user.add({
-            userId: userId,
+          console.log(`📧 Updating user email: ${userSession.email}`);
+          await zepClient.user.update(userId, {
+            email: userSession.email,
             metadata: {
-              created_at: new Date().toISOString()
+              ...existingUser.metadata,
+              firebase_email: userSession.email,
+              last_updated: new Date().toISOString()
             }
           });
-          console.log(`👤 Created new Zep user: ${userId}`);
+          console.log(`✅ User email updated successfully`);
+        } catch (updateError) {
+          console.warn(`⚠️ Could not update user email: ${updateError.message}`);
+        }
+      }
+    } catch (error) {
+      // User doesn't exist, create them with Firebase UID
+      if (error.message.includes('404') || error.message.includes('not found')) {
+        // Use lock to prevent duplicate creation
+        if (userCreationLocks.has(userId)) {
+          console.log(`🚫 User creation already in progress for ${userId}, aborting duplicate attempt`);
+          return;
+        }
+        
+        userCreationLocks.add(userId);
+        try {
+          console.log(`➕ Creating new Zep user with Firebase UID: ${userId}`);
+          console.log(`📧 Adding Firebase email: ${userSession.email || 'No email provided'}`);
+          const newUser = await zepClient.user.add({
+            userId: userId,
+            email: userSession.email || null,
+            metadata: {
+              firebase_uid: userId,
+              firebase_email: userSession.email,
+              created_at: new Date().toISOString(),
+              first_session: sessionId
+            }
+          });
+          console.log(`👤 Created new Zep user with Firebase UID: ${userId}`);
+          console.log(`📋 New user details:`, JSON.stringify(newUser, null, 2));
         } catch (createError) {
           console.warn(`Could not create user: ${createError.message}`);
+        } finally {
+          userCreationLocks.delete(userId);
         }
       } else {
         console.warn(`Could not get user: ${error.message}`);
       }
     }
     
-    // Sessions are automatically created when adding messages
-    console.log(`💭 Using Zep session: ${sessionId} for user ${userId}`);
+    // CRITICAL: Explicitly add session to the user to ensure proper linking
+    try {
+      console.log(`🔗 Adding session ${sessionId} to user ${userId}...`);
+      await zepClient.memory.addSession({
+        userId: userId,
+        sessionId: sessionId,
+        metadata: {
+          firebase_uid: userId,
+          user_email: userSession.email || 'unknown',
+          created_at: new Date().toISOString()
+        }
+      });
+      console.log(`✅ Session ${sessionId} successfully linked to user ${userId}`);
+    } catch (sessionError) {
+      if (sessionError.message.includes('already exists') || sessionError.message.includes('duplicate')) {
+        console.log(`ℹ️ Session ${sessionId} already exists for user ${userId}`);
+      } else {
+        console.error(`❌ Failed to add session: ${sessionError.message}`);
+        // Don't throw - we can still proceed with memory storage
+      }
+    }
+    
+    // Memory will be stored under the consistent Firebase UID
+    console.log(`💭 Using Firebase UID for persistent memory: ${userId}`);
+    console.log(`🆔 Session ID for this conversation: ${sessionId}`);
+    
+    // Debug: Try to get user details to see what's in Zep
+    try {
+      console.log(`🔍 Checking user details in Zep...`);
+      const userDetails = await zepClient.user.get(userId);
+      console.log(`📋 User details from Zep:`, JSON.stringify(userDetails, null, 2));
+    } catch (userError) {
+      console.warn(`Could not get user details: ${userError.message}`);
+    }
   }
 
   async function getRecentMemories(userId, sessionId) {
-    if (!zepClient || !userId || !sessionId) return [];
+    if (!zepClient || !userId) return [];
     
     try {
-      // Get recent memories from the session using the correct Zep Cloud API
-      const memory = await zepClient.memory.get(sessionId, {
+      // Get recent memories from the user using Firebase UID as consistent identifier
+      console.log(`🔍 Retrieving memories for user: ${userId}`);
+      const memory = await zepClient.memory.get(userId, {
         lastn: 10  // Get last 10 messages
       });
       
+      console.log(`📋 Memory retrieval response:`, memory ? `Found ${memory.messages?.length || 0} messages` : 'No memory found');
+      
       // Return the memories in a format compatible with memory context
       if (memory && memory.messages) {
+        console.log(`📚 Found ${memory.messages.length} recent memories for user ${userId}`);
         return memory.messages.map(msg => ({
           content: msg.content,
           role: msg.role_type || msg.role,
           timestamp: msg.created_at
         }));
       }
+      
+      console.log(`📚 No recent memories found for user ${userId}`);
       return [];
     } catch (error) {
-      console.warn(`Could not retrieve memories: ${error.message}`);
+      console.warn(`Could not retrieve memories for ${userId}: ${error.message}`);
       return [];
     }
   }
 
-  async function storeMemory(userId, sessionId, userMessage, assistantMessage) {
-    if (!zepClient || !userId || !sessionId) return;
+  async function storeMemory(userId, sessionId, userMessage, assistantMessage, userSession = {}) {
+    if (!zepClient || !userId) return;
     
     try {
       // Build messages array according to Zep Cloud API documentation
@@ -206,7 +300,7 @@ wss.on('connection', (clientWs) => {
       
       if (userMessage && userMessage.trim()) {
         messages.push({
-          role: userId, // Using userId as the role name
+          role: 'user',
           roleType: 'user',
           content: userMessage.trim()
         });
@@ -214,16 +308,73 @@ wss.on('connection', (clientWs) => {
       
       if (assistantMessage && assistantMessage.trim()) {
         messages.push({
-          role: 'AI Assistant',
+          role: 'assistant',
           roleType: 'assistant', 
           content: assistantMessage.trim()
         });
       }
       
       if (messages.length > 0) {
-        // Use the correct Zep Cloud API method
-        await zepClient.memory.add(sessionId, { messages: messages });
-        console.log(`💾 Stored conversation in Zep for user ${userId}`);
+        console.log(`💾 Storing memory using explicit User + Session pattern`);
+        console.log(`👤 Firebase UID as User ID: ${userId}`);
+        console.log(`🔗 Session ID: ${sessionId}`);
+        console.log(`📧 User email: ${userSession?.email || 'unknown'}`);
+        console.log(`📝 Messages to store:`, JSON.stringify(messages, null, 2));
+        
+        try {
+          // First ensure the user exists (we already did this in ensureUserSession)
+          try {
+            const userCheck = await zepClient.user.get(userId);
+            console.log(`✅ Confirmed user exists: ${userId} (${userCheck.email || 'no email'})`);
+          } catch (userError) {
+            console.log(`❌ User not found, this should not happen: ${userId}`);
+            return;
+          }
+          
+          // Use the NEW explicit user + session pattern from Zep docs
+          // This should store under the Firebase UID user, not create session users
+          const memoryResult = await zepClient.memory.add(sessionId, {
+            messages: messages,
+            metadata: {
+              sessionId: sessionId,
+              timestamp: new Date().toISOString(),
+              firebase_uid: userId,
+              user_email: userSession?.email || 'unknown'
+            }
+          });
+          
+          console.log(`✅ Memory stored using session ID: ${sessionId}`);
+          
+          // Verify the storage worked correctly
+          console.log(`🔍 Verifying memory was stored correctly...`);
+          try {
+            const verification = await zepClient.memory.get(sessionId, { lastn: 1 });
+            if (verification && verification.messages && verification.messages.length > 0) {
+              console.log(`✅ SUCCESS: Memory verified for session ${sessionId}`);
+              console.log(`📊 Latest message: "${verification.messages[0].content}"`);
+              
+              // The key question: which user does this session belong to?
+              console.log(`🔍 Checking which user owns this session...`);
+              console.log(`📋 Session verification response keys: ${Object.keys(verification)}`);
+              if (verification.user_id) {
+                console.log(`👤 Session belongs to user: ${verification.user_id}`);
+                if (verification.user_id === userId) {
+                  console.log(`✅ CORRECT: Session linked to Firebase UID ${userId}`);
+                } else {
+                  console.log(`🚨 PROBLEM: Session linked to ${verification.user_id} instead of ${userId}`);
+                }
+              }
+            } else {
+              console.log(`❌ WARNING: No memories found for session ${sessionId} after storage`);
+            }
+          } catch (verifyError) {
+            console.log(`❌ Could not verify memory storage: ${verifyError.message}`);
+          }
+          
+        } catch (error) {
+          console.error(`❌ Memory storage failed: ${error.message}`);
+          console.error(`📋 Error details:`, JSON.stringify(error, null, 2));
+        }
       }
     } catch (error) {
       console.warn(`Could not store memory: ${error.message}`);
@@ -322,7 +473,7 @@ wss.on('connection', (clientWs) => {
             const assistantMessage = event.transcript;
             if (userSession.lastUserMessage && assistantMessage) {
               // Store in Zep asynchronously
-              storeMemory(userSession.uid, userSession.sessionId, userSession.lastUserMessage, assistantMessage);
+                              storeMemory(userSession.uid, userSession.sessionId, userSession.lastUserMessage, assistantMessage, userSession);
               userSession.lastUserMessage = null;
             }
           }
@@ -464,7 +615,7 @@ wss.on('connection', (clientWs) => {
     // Store the user text message in Zep
     if (text && userSession.uid && userSession.sessionId) {
       try {
-        await storeMemory(userSession.uid, userSession.sessionId, text, 'Processing...');
+        await storeMemory(userSession.uid, userSession.sessionId, text, 'Processing...', userSession);
       } catch (error) {
         console.warn('Could not store text message:', error.message);
       }

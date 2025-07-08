@@ -22,6 +22,7 @@ const RealtimeInterface = () => {
   const mediaRecorder = useRef<MediaRecorder | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const audioQueue = useRef<any[]>([]); // A more specific type can be used
+  const connectionInitialized = useRef<boolean>(false); // Add connection guard
   let isPlaying = false;
   let nextStartTime = 0;
 
@@ -63,12 +64,21 @@ const RealtimeInterface = () => {
   };
 
   useEffect(() => {
+    // Prevent duplicate connections (React.StrictMode can cause double mounting)
+    if (connectionInitialized.current) {
+      console.log('Connection already initialized, skipping duplicate setup');
+      return;
+    }
+    
     // This effect runs once to set up the WebSocket connection and enumerate media devices.
     const user = auth.currentUser;
     if (!user) {
       setStatus('Please sign in to start a session.');
       return;
     }
+
+    console.log('Setting up WebSocket connection for user:', user.email);
+    connectionInitialized.current = true; // Mark as initialized
 
     // Get media devices
     navigator.mediaDevices.enumerateDevices().then(devices => {
@@ -136,7 +146,8 @@ const RealtimeInterface = () => {
           } else if (data.type === 'error') {
             addMessage('system', `Error: ${data.message}`);
           } else {
-            addMessage('system', `Error: Unknown message type`);
+            // Log unknown message types for debugging but don't show error to user
+            console.log('Unknown message type from server:', data.type, data);
           }
         };
 
@@ -157,6 +168,8 @@ const RealtimeInterface = () => {
 
     // Cleanup on unmount
     return () => {
+      console.log('Cleaning up WebSocket connection');
+      connectionInitialized.current = false; // Reset connection guard
       if (ws.current) {
         ws.current.close();
       }
@@ -172,6 +185,13 @@ const RealtimeInterface = () => {
   const handleStartSession = async () => {
     if (ws.current?.readyState !== WebSocket.OPEN) {
       addMessage('system', 'WebSocket is not connected. Please wait.');
+      return;
+    }
+
+    // Double-check authentication
+    const user = auth.currentUser;
+    if (!user) {
+      addMessage('system', 'Please sign in first.');
       return;
     }
     
