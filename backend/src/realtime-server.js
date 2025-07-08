@@ -149,48 +149,50 @@ wss.on('connection', (clientWs) => {
     try {
       // Try to get existing user
       await zepClient.user.get(userId);
+      console.log(`👤 User already exists: ${userId}`);
     } catch (error) {
       // User doesn't exist, create them
       if (error.message.includes('404') || error.message.includes('not found')) {
-        await zepClient.user.add({
-          user_id: userId,
-          metadata: {
-            created_at: new Date().toISOString()
-          }
-        });
-        console.log(`👤 Created new Zep user: ${userId}`);
+        try {
+          await zepClient.user.add({
+            userId: userId,
+            metadata: {
+              created_at: new Date().toISOString()
+            }
+          });
+          console.log(`👤 Created new Zep user: ${userId}`);
+        } catch (createError) {
+          console.warn(`Could not create user: ${createError.message}`);
+        }
+      } else {
+        console.warn(`Could not get user: ${error.message}`);
       }
     }
     
-    // Create a new session for this conversation
-    try {
-      await zepClient.session.add(sessionId, {
-        user_id: userId,
-        metadata: {
-          session_type: 'realtime_voice',
-          created_at: new Date().toISOString()
-        }
-      });
-      console.log(`💭 Created Zep session: ${sessionId} for user ${userId}`);
-    } catch (error) {
-      if (!error.message.includes('409') && !error.message.includes('conflict')) {
-        throw error;
-      }
-      // Session already exists, which is fine
-    }
+    // Sessions are automatically created when adding messages
+    console.log(`💭 Using Zep session: ${sessionId} for user ${userId}`);
   }
 
   async function getRecentMemories(userId, sessionId) {
-    if (!zepClient || !userId) return [];
+    if (!zepClient || !userId || !sessionId) return [];
     
     try {
-      const memories = await zepClient.memory.search(sessionId, {
-        text: "recent conversation",
-        limit: 5
+      // Get recent memories from the session using the correct Zep Cloud API
+      const memory = await zepClient.memory.get(sessionId, {
+        lastn: 10  // Get last 10 messages
       });
-      return memories.results || [];
+      
+      // Return the memories in a format compatible with memory context
+      if (memory && memory.messages) {
+        return memory.messages.map(msg => ({
+          content: msg.content,
+          role: msg.role_type || msg.role,
+          timestamp: msg.created_at
+        }));
+      }
+      return [];
     } catch (error) {
-      console.warn('Could not retrieve memories:', error.message);
+      console.warn(`Could not retrieve memories: ${error.message}`);
       return [];
     }
   }
@@ -199,19 +201,32 @@ wss.on('connection', (clientWs) => {
     if (!zepClient || !userId || !sessionId) return;
     
     try {
-      await zepClient.message.add(sessionId, {
-        role: 'user',
-        content: userMessage
-      });
+      // Build messages array according to Zep Cloud API documentation
+      const messages = [];
       
-      await zepClient.message.add(sessionId, {
-        role: 'assistant', 
-        content: assistantMessage
-      });
+      if (userMessage && userMessage.trim()) {
+        messages.push({
+          role: userId, // Using userId as the role name
+          roleType: 'user',
+          content: userMessage.trim()
+        });
+      }
       
-      console.log(`💾 Stored conversation in Zep for user ${userId}`);
+      if (assistantMessage && assistantMessage.trim()) {
+        messages.push({
+          role: 'AI Assistant',
+          roleType: 'assistant', 
+          content: assistantMessage.trim()
+        });
+      }
+      
+      if (messages.length > 0) {
+        // Use the correct Zep Cloud API method
+        await zepClient.memory.add(sessionId, { messages: messages });
+        console.log(`💾 Stored conversation in Zep for user ${userId}`);
+      }
     } catch (error) {
-      console.warn('Could not store memory:', error.message);
+      console.warn(`Could not store memory: ${error.message}`);
     }
   }
 
@@ -232,7 +247,7 @@ wss.on('connection', (clientWs) => {
       let memoryContext = '';
       if (recentMemories.length > 0) {
         memoryContext = '\n\nRecent conversation context:\n' + 
-          recentMemories.map(m => `- ${m.message?.content || m.content}`).join('\n');
+          recentMemories.map(m => `- ${m.role}: ${m.content}`).join('\n');
       }
       
       // Connect to OpenAI Realtime API

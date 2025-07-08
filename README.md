@@ -41,7 +41,7 @@ cd backend
 npm install
 ```
 
-2. Create `.env` file:
+2. Create `.env` file in the `backend/` directory:
 ```bash
 OPENAI_API_KEY=your_openai_api_key_here
 FIREBASE_SERVICE_ACCOUNT_KEY={"type":"service_account",...}
@@ -50,8 +50,10 @@ PORT=3001
 NODE_ENV=development
 ```
 
-3. Start the backend:
+3. Start the backend (from `backend/` directory):
 ```bash
+# Make sure you're in the backend directory!
+cd backend
 node src/realtime-server.js
 ```
 
@@ -63,7 +65,7 @@ cd frontend
 npm install
 ```
 
-2. Create `.env` file:
+2. Create `.env` file in the `frontend/` directory:
 ```bash
 VITE_FIREBASE_API_KEY=your_firebase_api_key
 VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
@@ -73,10 +75,39 @@ VITE_FIREBASE_MESSAGING_SENDER_ID=123456789
 VITE_FIREBASE_APP_ID=1:123456789:web:abcdef123456
 ```
 
-3. Start the frontend:
+3. Start the frontend (from `frontend/` directory):
 ```bash
+# Make sure you're in the frontend directory!
+cd frontend
 npm run dev
 ```
+
+## 🚀 Quick Start Commands
+
+**Option 1: Step by Step**
+```bash
+# Terminal 1 - Backend
+cd "/path/to/your/project/backend"
+node src/realtime-server.js
+
+# Terminal 2 - Frontend  
+cd "/path/to/your/project/frontend"
+npm run dev
+```
+
+**Option 2: One-line Commands**
+```bash
+# Backend (from project root)
+cd backend && node src/realtime-server.js
+
+# Frontend (from project root)  
+cd frontend && npm run dev
+```
+
+**⚠️ Common Issue: Directory Confusion**
+- Always run `node src/realtime-server.js` from the `backend/` directory
+- If you get "Cannot find module" error, you're in the wrong directory
+- The correct path structure is: `backend/src/realtime-server.js`
 
 ## 🎯 Usage
 
