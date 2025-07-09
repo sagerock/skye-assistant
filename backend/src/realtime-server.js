@@ -152,6 +152,7 @@ async function persistTokenUsageToFirestore(userId, email, sessionId, model, inp
       userId,
       email,
       sessionId,
+      model,
       inputTokens,
       outputTokens,
       totalTokens,
@@ -301,16 +302,40 @@ async function getTokenAnalyticsFromFirestore() {
       }
     });
 
-    // Get recent sessions from events
+    // Get model breakdown and recent sessions from events
     const recentSessions = [];
     const sessionMap = new Map();
-    const eventsSnapshot = await db.collection('analytics').doc('token_usage').collection('events').orderBy('timestamp', 'desc').limit(100).get();
+    const modelBreakdown = new Map();
+    const eventsSnapshot = await db.collection('analytics').doc('token_usage').collection('events').orderBy('timestamp', 'desc').limit(500).get();
     
     eventsSnapshot.forEach(doc => {
       try {
         const eventData = doc.data();
         const sessionId = eventData.sessionId;
+        const model = eventData.model || 'unknown';
         
+        // Track model usage
+        if (!modelBreakdown.has(model)) {
+          modelBreakdown.set(model, {
+            model,
+            totalTokens: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalRequests: 0,
+            uniqueUsers: new Set()
+          });
+        }
+        
+        const modelData = modelBreakdown.get(model);
+        modelData.totalTokens += eventData.totalTokens || 0;
+        modelData.inputTokens += eventData.inputTokens || 0;
+        modelData.outputTokens += eventData.outputTokens || 0;
+        modelData.totalRequests += 1;
+        if (eventData.userId) {
+          modelData.uniqueUsers.add(eventData.userId);
+        }
+        
+        // Track sessions
         if (!sessionMap.has(sessionId)) {
           sessionMap.set(sessionId, {
             sessionId,
@@ -343,6 +368,17 @@ async function getTokenAnalyticsFromFirestore() {
 
     const topUsers = users.sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 20);
 
+    // Convert model breakdown to array and sort by token usage
+    const modelStats = Array.from(modelBreakdown.values()).map(model => ({
+      model: model.model,
+      totalTokens: model.totalTokens,
+      inputTokens: model.inputTokens,
+      outputTokens: model.outputTokens,
+      totalRequests: model.totalRequests,
+      uniqueUsers: model.uniqueUsers.size,
+      avgTokensPerRequest: model.totalRequests > 0 ? Math.round(model.totalTokens / model.totalRequests) : 0
+    })).sort((a, b) => b.totalTokens - a.totalTokens);
+
     return {
       global: {
         totalTokens: globalData.totalTokens || 0,
@@ -351,6 +387,7 @@ async function getTokenAnalyticsFromFirestore() {
         lastUpdate: globalData.lastUpdate ? safeTimestampToISO(globalData.lastUpdate) : null
       },
       topUsers,
+      modelBreakdown: modelStats,
       recentSessions: Array.from(sessionMap.values()).slice(0, 20),
       totalUsers: users.length
     };
