@@ -10,6 +10,16 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
+// Debug: Log the actual configuration being used
+console.log('🔥 Firebase Config:', {
+  apiKey: firebaseConfig.apiKey ? firebaseConfig.apiKey.substring(0, 10) + '...' : 'UNDEFINED',
+  authDomain: firebaseConfig.authDomain || 'UNDEFINED',
+  projectId: firebaseConfig.projectId || 'UNDEFINED',
+  storageBucket: firebaseConfig.storageBucket || 'UNDEFINED',
+  messagingSenderId: firebaseConfig.messagingSenderId || 'UNDEFINED',
+  appId: firebaseConfig.appId ? firebaseConfig.appId.substring(0, 10) + '...' : 'UNDEFINED'
+});
+
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export default app;

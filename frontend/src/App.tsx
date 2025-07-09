@@ -28,14 +28,19 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <h1>Skye Assistant</h1>
+        <h1>Skye</h1>
+        <p>AI Companion</p>
       </header>
       
       <main className="app-main">
         {user ? (
-          <div>
-            <p>Welcome, {user.email}</p>
-            <button onClick={() => auth.signOut()}>Sign Out</button>
+          <div className="user-welcome">
+            <div className="welcome-message">
+              <p>Welcome back 🤍</p>
+              <button className="sign-out-button" onClick={() => auth.signOut()}>
+                Sign Out
+              </button>
+            </div>
             <RealtimeInterface />
           </div>
         ) : (

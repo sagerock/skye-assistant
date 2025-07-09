@@ -12,7 +12,7 @@ const RealtimeInterface = () => {
   const [status, setStatus] = useState('Connecting to server...');
   const [statusClass, setStatusClass] = useState('');
   const [messages, setMessages] = useState<Message[]>([
-    { type: 'system', content: 'Welcome! Sign in and press "Start Session" to begin.', timestamp: new Date().toLocaleTimeString() }
+    { type: 'system', content: 'Ready to talk? Press "Begin" when you want to start.', timestamp: new Date().toLocaleTimeString() }
   ]);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
@@ -72,8 +72,8 @@ const RealtimeInterface = () => {
     
     // This effect runs once to set up the WebSocket connection and enumerate media devices.
     const user = auth.currentUser;
-    if (!user) {
-      setStatus('Please sign in to start a session.');
+            if (!user) {
+      setStatus('Please sign in to start.');
       return;
     }
 
@@ -107,18 +107,25 @@ const RealtimeInterface = () => {
           console.log('WS Message:', data);
 
           if (data.type === 'welcome') {
-            setStatus('Authenticating...');
+            setStatus('Connecting...');
           } else if (data.type === 'auth_success') {
-            setStatus('Connected. Ready to start session.');
+            setStatus('Connected and ready.');
             setStatusClass('connected');
             addMessage('system', data.message);
+            if (data.tier) {
+              addMessage('system', `You have ${data.tier} access${data.tier === 'premium' ? ' - enhanced conversations enabled.' : '.'}`);
+            }
           } else if (data.type === 'auth_error') {
-            setStatus('Authentication failed.');
+            setStatus('Connection failed. Please try again.');
             setStatusClass('error');
-            addMessage('system', `Auth Error: ${data.message}`);
+            addMessage('system', `Connection issue: ${data.message}`);
           } else if (data.type === 'session_started') {
             addMessage('system', data.message);
-            setStatus('Session active. Start speaking.');
+            if (data.tier && data.model) {
+              const modelName = data.model.includes('gpt-4o-mini') ? 'GPT-4o Mini' : 'GPT-4o';
+              addMessage('system', `Using ${modelName} for our conversation`);
+            }
+            setStatus('Connected. Start talking.');
             setStatusClass('active');
           } else if (data.type === 'speech_started') {
             setStatus('Listening...');
@@ -138,7 +145,7 @@ const RealtimeInterface = () => {
               return [...prev, { type: 'assistant', content: data.text, timestamp: new Date().toLocaleTimeString() }];
             });
           } else if (data.type === 'response_complete') {
-            setStatus('Session active. Start speaking.');
+            setStatus('Connected. Start talking.');
           } else if (data.type === 'session_ended') {
             addMessage('system', data.message);
             setStatus('Session ended.');
@@ -152,13 +159,13 @@ const RealtimeInterface = () => {
         };
 
         socket.onclose = () => {
-          setStatus('Disconnected. Click start to reconnect.');
+          setStatus('Connection closed. Press "Begin" to reconnect.');
           setStatusClass('error');
         };
 
         socket.onerror = (error) => {
           console.error('WebSocket Error:', error);
-          setStatus('Connection error.');
+          setStatus('Connection error. Please try again.');
           setStatusClass('error');
         };
       });
@@ -184,7 +191,7 @@ const RealtimeInterface = () => {
 
   const handleStartSession = async () => {
     if (ws.current?.readyState !== WebSocket.OPEN) {
-      addMessage('system', 'WebSocket is not connected. Please wait.');
+      addMessage('system', 'Connection not ready. Please wait.');
       return;
     }
 
@@ -197,7 +204,7 @@ const RealtimeInterface = () => {
     
     addMessage('system', 'Starting session...');
     setIsSessionActive(true);
-    setStatus('Session starting...');
+    setStatus('Starting...');
     setStatusClass('active');
 
     try {
@@ -252,9 +259,9 @@ const RealtimeInterface = () => {
         voice: voice
       }));
     } catch (error) {
-      addMessage('system', `Error accessing microphone: ${error}`);
+      addMessage('system', `Microphone access required. Please allow and try again.`);
       setIsSessionActive(false);
-      setStatus('Error starting session.');
+      setStatus('Microphone access needed.');
       setStatusClass('error');
     }
   };
@@ -274,9 +281,9 @@ const RealtimeInterface = () => {
       ws.current.send(JSON.stringify({ type: 'stop_session' }));
     }
     
-    addMessage('system', 'Session stopped.');
+    addMessage('system', 'Session ended.');
     setIsSessionActive(false);
-    setStatus('Session stopped. Click start to begin again.');
+    setStatus('Press "Begin" to start again.');
     setStatusClass('');
   };
 
@@ -306,13 +313,13 @@ const RealtimeInterface = () => {
             className={`main-button start ${isSessionActive ? 'hidden' : ''}`} 
             onClick={handleStartSession}
           >
-            Start Session
+            Begin
           </button>
           <button 
             className={`main-button stop ${!isSessionActive ? 'hidden' : ''}`} 
             onClick={handleStopSession}
           >
-            Stop Session
+            End Gracefully
           </button>
         </div>
         <div className="audio-device-selector">
@@ -330,35 +337,24 @@ const RealtimeInterface = () => {
           </select>
         </div>
         <div className="settings">
-          <h3>Settings</h3>
+          <h3>Preferences</h3>
           <div>
-            <label htmlFor="voice-select">Assistant Voice:</label>
+            <label htmlFor="voice-select">Skye's Voice:</label>
             <select id="voice-select" defaultValue="sage">
+              <option value="sage">Sage (Recommended)</option>
+              <option value="shimmer">Shimmer</option>
+              <option value="coral">Coral</option>
               <option value="alloy">Alloy</option>
               <option value="ash">Ash</option>
               <option value="ballad">Ballad</option>
-              <option value="coral">Coral</option>
               <option value="echo">Echo</option>
-
-              <option value="sage">Sage</option>
-              <option value="shimmer">Shimmer</option>
               <option value="verse">Verse</option>
-            </select>
-          </div>
-          <div>
-            <label htmlFor="model-select">Model:</label>
-            <select id="model-select" defaultValue="gpt-4o-mini">
-              <option value="gpt-4o-mini">GPT-4o Mini</option>
-              <option value="gpt-4o">GPT-4o</option>
             </select>
           </div>
         </div>
       </div>
 
-      <div className="debug-container">
-        <h3>Debug Log</h3>
-        <div className="debug-log" id="debug-log"></div>
-      </div>
+
     </div>
   );
 };

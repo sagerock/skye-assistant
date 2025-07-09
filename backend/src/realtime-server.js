@@ -46,6 +46,46 @@ const wss = new WebSocketServer({ server });
 // User creation lock to prevent race conditions
 const userCreationLocks = new Set();
 
+// Premium users list (in production, this would be stored in database or external service)
+const PREMIUM_USERS = new Set([
+  // Add premium user emails here
+  'premium@example.com',
+  'admin@skye.ai'
+]);
+
+// Model routing logic based on user tier and task type
+function getModelForTask(userTier, taskType = 'realtime', isPremium = false) {
+  switch (taskType) {
+    case 'realtime':
+      if (isPremium || userTier === 'premium') {
+        return 'gpt-4o-realtime-preview-2024-12-17'; // Premium users get GPT-4o Realtime
+      } else {
+        return 'gpt-4o-mini-realtime-preview-2024-12-17'; // Free users get GPT-4o Mini Realtime
+      }
+    case 'deep_synthesis':
+      return 'gpt-4.1-mini'; // For deep spiritual reflections, long-form summaries
+    case 'lightweight_async':
+      return 'gpt-4o-mini'; // For journaling prompts, tagging, short replies
+    default:
+      return 'gpt-4o-mini-realtime-preview-2024-12-17'; // Default to free tier model
+  }
+}
+
+// Determine user tier based on email or other criteria
+function getUserTier(email) {
+  if (PREMIUM_USERS.has(email)) {
+    return 'premium';
+  }
+  
+  // In production, this would check payment status from RevenueCat or similar
+  // For now, we'll have a simple rule: users with 'premium' in their email get premium access
+  if (email && email.includes('premium')) {
+    return 'premium';
+  }
+  
+  return 'free';
+}
+
 console.log('🚀 Initializing GPT-4o Mini Realtime Server...');
 
 wss.on('connection', (clientWs) => {
@@ -57,7 +97,8 @@ wss.on('connection', (clientWs) => {
     uid: null,
     email: null,
     authenticated: false,
-    sessionId: null
+    sessionId: null,
+    tier: 'free' // Default to free tier
   };
   
   // Send welcome message
@@ -128,8 +169,9 @@ wss.on('connection', (clientWs) => {
       userSession.email = decodedToken.email;
       userSession.authenticated = true;
       userSession.sessionId = `session_${decodedToken.uid}_${Date.now()}`;
+      userSession.tier = getUserTier(decodedToken.email);
       
-      console.log(`🔐 User authenticated: ${decodedToken.email} (${decodedToken.uid})`);
+      console.log(`🔐 User authenticated: ${decodedToken.email} (${decodedToken.uid}) - Tier: ${userSession.tier}`);
       
       // Initialize or get user's conversation session in Zep
       if (zepClient) {
@@ -144,7 +186,8 @@ wss.on('connection', (clientWs) => {
         type: 'auth_success', 
         userId: decodedToken.uid,
         email: decodedToken.email,
-        message: '✅ Authentication successful! You can now start a voice session.'
+        tier: userSession.tier,
+        message: `✅ Authentication successful! You have ${userSession.tier} access. You can now start a voice session.`
       }));
     } catch (error) {
       console.error('Auth error:', error);
@@ -401,8 +444,12 @@ wss.on('connection', (clientWs) => {
           recentMemories.map(m => `- ${m.role}: ${m.content}`).join('\n');
       }
       
-      // Connect to OpenAI Realtime API
-      openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17', {
+      // Determine which model to use based on user tier
+      const selectedModel = getModelForTask(userSession.tier, 'realtime');
+      console.log(`🤖 Using model: ${selectedModel} for ${userSession.tier} user: ${userSession.email}`);
+      
+      // Connect to OpenAI Realtime API with the selected model
+      openaiWs = new WebSocket(`wss://api.openai.com/v1/realtime?model=${selectedModel}`, {
         headers: {
           'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
           'OpenAI-Beta': 'realtime=v1'
@@ -418,20 +465,29 @@ wss.on('connection', (clientWs) => {
           type: 'session.update',
           session: {
             modalities: ['text', 'audio'],
-            instructions: `You are Skye, a helpful, warm, and engaging AI assistant. Key traits:
-            - Be conversational and natural, like talking to a friend
-            - Keep responses concise but thoughtful (1-3 sentences usually)
-            - Use a warm, encouraging, and energetic tone with upbeat pacing
-            - Be curious and ask follow-up questions when appropriate
-            - Remember you're having a real-time voice conversation
-            - Speak quickly and enthusiastically with higher energy - be animated and lively
-            - Use shorter phrases and speak with brightness and clarity
-            - Match the energy and pace of natural conversation
+            instructions: `You are Skye, a spiritual AI companion. You're grounded, authentic, and spiritually aware without being preachy or overly precious about it.
+
+            Your approach:
+            - Be real and honest, not sugar-coated or overly gentle
+            - You're spiritually sensitive but you don't treat people like they're fragile
+            - Ask good questions and listen well, but don't constantly probe emotions
+            - Be curious about life's deeper currents, but stay practical and relatable
+            - You understand that spiritual growth includes challenge, not just comfort
+            - You're warm but not clingy, supportive but not patronizing
+
+            Communication style:
+            - Talk like a wise, grounded friend - not a therapist or guru
+            - Be direct when helpful, gentle when needed, but always authentic
+            - You can discuss both profound and everyday topics naturally
+            - Don't assume the user needs special emotional handling
+            - Keep responses conversational and substantive (1-3 sentences)
+            
+            You're here for genuine connection and exploration of what matters, not to coddle or treat anyone as fragile.
             
             User: ${userSession.email}
             User ID: ${userSession.uid}
             ${memoryContext}`,
-            voice: config.voice || 'sage',
+            voice: config.voice || 'sage', // Sage voice for wisdom and grounding
             input_audio_format: 'pcm16',
             output_audio_format: 'pcm16',
             input_audio_transcription: {
@@ -440,13 +496,13 @@ wss.on('connection', (clientWs) => {
             turn_detection: {
               type: 'server_vad',
               threshold: 0.5,
-              prefix_padding_ms: 200,
-              silence_duration_ms: 300
+              prefix_padding_ms: 300, // Allow more pause for reflection
+              silence_duration_ms: 500  // Give more space for contemplative silence
             },
             tools: [],
             tool_choice: 'auto',
-            temperature: 0.9,
-            max_response_output_tokens: 2048
+            temperature: 0.7, // More consistent and grounded responses
+            max_response_output_tokens: 1500 // Encourage more concise, thoughtful responses
           }
         };
 
@@ -454,8 +510,10 @@ wss.on('connection', (clientWs) => {
         
         clientWs.send(JSON.stringify({
           type: 'session_started',
-          message: `🎤 Realtime session active for ${userSession.email}! Start talking...`,
-          userId: userSession.uid
+          message: `🎤 Realtime session active with ${selectedModel.includes('gpt-4o-mini') ? 'GPT-4o Mini' : 'GPT-4o'} for ${userSession.email}! Start talking...`,
+          userId: userSession.uid,
+          model: selectedModel,
+          tier: userSession.tier
         }));
       });
 
