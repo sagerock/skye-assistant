@@ -2583,9 +2583,9 @@ Remember to reference previous conversations naturally and build on established 
             },
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.5,
+              threshold: 0.3,
               prefix_padding_ms: 300, // Allow more pause for reflection
-              silence_duration_ms: 500  // Give more space for contemplative silence
+              silence_duration_ms: 1500  // Give more time to finish speaking (1.5 seconds)
             },
             tools: [],
             tool_choice: 'auto',
@@ -2772,6 +2772,16 @@ Remember to reference previous conversations naturally and build on established 
                 type: 'speech_stopped',
                 message: '🤔 Processing...'
               }));
+              
+              // Manually trigger response generation after speech stops
+              console.log('🔄 Triggering response creation after speech stopped');
+              const responseEvent = {
+                type: 'response.create',
+                response: {
+                  modalities: ['text', 'audio']
+                }
+              };
+              openaiWs.send(JSON.stringify(responseEvent));
               break;
               
             case 'conversation.item.input_audio_transcription.completed':

@@ -20,9 +20,18 @@ const RealtimeInterface = () => {
   const [userTier, setUserTier] = useState<string>('free');
   const [tierLimits, setTierLimits] = useState<any>(null);
   
+  // New audio management states
+  const [isUserSpeaking, setIsUserSpeaking] = useState(false);
+  const [isAISpeaking, setIsAISpeaking] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [conversationMode, setConversationMode] = useState<'continuous' | 'push-to-talk'>('continuous');
+  
   const ws = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
-  const connectionInitialized = useRef<boolean>(false); // Add connection guard
+  const connectionInitialized = useRef<boolean>(false);
+  const analyser = useRef<AnalyserNode | null>(null);
+  const vadThreshold = useRef<number>(0.01); // Voice activity detection threshold
+  const silenceTimeout = useRef<NodeJS.Timeout | null>(null);
   let nextStartTime = 0;
 
   const addMessage = (type: Message['type'], content: string) => {
@@ -60,6 +69,61 @@ const RealtimeInterface = () => {
     const playTime = Math.max(audioContext.current.currentTime, nextStartTime);
     source.start(playTime);
     nextStartTime = playTime + audioBuffer.duration;
+    
+    // Track AI speaking state
+    setIsAISpeaking(true);
+    setStatus('🤖 Skye is speaking...');
+    
+    // Clear any existing timeout and set new one
+    const timeoutDuration = audioBuffer.duration * 1000 + 100; // Add small buffer
+    setTimeout(() => {
+      setIsAISpeaking(false);
+      setStatus('💬 Your turn to speak');
+    }, timeoutDuration);
+  };
+
+  // Voice Activity Detection function
+  const analyzeAudioLevel = (inputBuffer: Float32Array) => {
+    // Calculate RMS (Root Mean Square) for audio level
+    let sum = 0;
+    for (let i = 0; i < inputBuffer.length; i++) {
+      sum += inputBuffer[i] * inputBuffer[i];
+    }
+    const rms = Math.sqrt(sum / inputBuffer.length);
+    
+    setAudioLevel(rms);
+    
+    const isCurrentlySpeaking = rms > vadThreshold.current;
+    
+    if (isCurrentlySpeaking !== isUserSpeaking) {
+      setIsUserSpeaking(isCurrentlySpeaking);
+      
+      if (isCurrentlySpeaking) {
+        // User started speaking
+        setStatus('🎤 You are speaking...');
+        
+        // If AI is speaking and user interrupts, stop AI
+        if (isAISpeaking) {
+          console.log('User interrupted AI');
+          // Could send interrupt signal to backend here
+        }
+        
+        // Clear silence timeout
+        if (silenceTimeout.current) {
+          clearTimeout(silenceTimeout.current);
+          silenceTimeout.current = null;
+        }
+      } else {
+        // User stopped speaking - start silence timer
+        silenceTimeout.current = setTimeout(() => {
+          setStatus('💭 Listening for your voice...');
+        }, 1000); // 1 second of silence before showing "listening"
+      }
+    }
+    
+    // For now, let's always send audio to ensure OpenAI gets continuous stream
+    // We'll improve this later once we confirm OpenAI is working
+    return true; // Always return true for now to send all audio
   };
 
   useEffect(() => {
@@ -248,29 +312,41 @@ const RealtimeInterface = () => {
         }
       });
       
-      // Create AudioContext for proper PCM16 conversion
+      // Create AudioContext for proper PCM16 conversion and analysis
       const audioContext = new AudioContext({ sampleRate: 24000 });
       const source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      
+      // Create analyser for voice activity detection
+      const audioAnalyser = audioContext.createAnalyser();
+      audioAnalyser.fftSize = 256;
+      source.connect(audioAnalyser);
+      analyser.current = audioAnalyser;
       
       processor.onaudioprocess = (event) => {
         if (ws.current?.readyState === WebSocket.OPEN) {
           const inputBuffer = event.inputBuffer.getChannelData(0);
           
-          // Convert float32 to PCM16
-          const pcm16Buffer = new Int16Array(inputBuffer.length);
-          for (let i = 0; i < inputBuffer.length; i++) {
-            pcm16Buffer[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32767));
+          // Perform voice activity detection
+          const isSpeaking = analyzeAudioLevel(inputBuffer);
+          
+          // Send all audio for now (we'll optimize later once OpenAI is working)
+          if (conversationMode === 'continuous') {
+            // Convert float32 to PCM16
+            const pcm16Buffer = new Int16Array(inputBuffer.length);
+            for (let i = 0; i < inputBuffer.length; i++) {
+              pcm16Buffer[i] = Math.max(-32768, Math.min(32767, inputBuffer[i] * 32767));
+            }
+            
+            // Convert to base64
+            const uint8Array = new Uint8Array(pcm16Buffer.buffer);
+            const base64 = btoa(String.fromCharCode(...uint8Array));
+            
+            ws.current?.send(JSON.stringify({ 
+              type: 'audio_data', 
+              audio: base64 
+            }));
           }
-          
-          // Convert to base64
-          const uint8Array = new Uint8Array(pcm16Buffer.buffer);
-          const base64 = btoa(String.fromCharCode(...uint8Array));
-          
-          ws.current?.send(JSON.stringify({ 
-            type: 'audio_data', 
-            audio: base64 
-          }));
         }
       };
       
@@ -326,6 +402,31 @@ const RealtimeInterface = () => {
       <div className={`status ${statusClass}`} id="status">
         {status}
       </div>
+
+      {/* Voice Activity Indicators */}
+      {isSessionActive && (
+        <div className="voice-activity-container">
+          <div className="conversation-state">
+            <div className={`voice-indicator ${isUserSpeaking ? 'active' : ''}`}>
+              <span className="indicator-label">You</span>
+              <div className="voice-level" style={{ width: `${Math.min(audioLevel * 1000, 100)}%` }}></div>
+            </div>
+            <div className={`voice-indicator ${isAISpeaking ? 'active' : ''}`}>
+              <span className="indicator-label">Skye</span>
+              <div className="voice-level ai-level" style={{ width: `${isAISpeaking ? 100 : 0}%` }}></div>
+            </div>
+          </div>
+          
+          <div className="conversation-tips">
+            {isAISpeaking && (
+              <div className="tip">💡 You can interrupt Skye by speaking</div>
+            )}
+            {!isUserSpeaking && !isAISpeaking && conversationMode === 'continuous' && (
+              <div className="tip">💬 Just start speaking naturally</div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="conversation-container">
         <div className="conversation" id="conversation">
@@ -389,7 +490,8 @@ const RealtimeInterface = () => {
         </div>
         <div className="settings">
           <h3>Preferences</h3>
-          <div>
+          
+          <div className="setting-group">
             <label htmlFor="voice-select">Skye's Voice:</label>
             <select id="voice-select" defaultValue="shimmer">
               <option value="shimmer">Shimmer (Recommended)</option>
@@ -402,6 +504,64 @@ const RealtimeInterface = () => {
               <option value="verse">Verse</option>
             </select>
           </div>
+
+          <div className="setting-group">
+            <label>Conversation Mode:</label>
+            <div className="mode-toggle">
+              <button 
+                className={`mode-btn ${conversationMode === 'continuous' ? 'active' : ''}`}
+                onClick={() => setConversationMode('continuous')}
+              >
+                🎤 Smart Voice Detection
+              </button>
+              <button 
+                className={`mode-btn ${conversationMode === 'push-to-talk' ? 'active' : ''}`}
+                onClick={() => setConversationMode('push-to-talk')}
+              >
+                🔘 Push to Talk (Coming Soon)
+              </button>
+            </div>
+            <div className="mode-description">
+              {conversationMode === 'continuous' 
+                ? "AI detects when you speak and manages turn-taking automatically" 
+                : "Hold a button while speaking (feature coming soon)"}
+            </div>
+          </div>
+
+          <div className="setting-group">
+            <label htmlFor="voice-sensitivity">Voice Sensitivity:</label>
+            <input 
+              type="range" 
+              id="voice-sensitivity"
+              min="0.001" 
+              max="0.1" 
+              step="0.001"
+              value={vadThreshold.current}
+              onChange={(e) => {
+                vadThreshold.current = parseFloat(e.target.value);
+              }}
+            />
+            <div className="sensitivity-labels">
+              <span>Sensitive</span>
+              <span>Normal</span>
+              <span>Less Sensitive</span>
+            </div>
+          </div>
+
+          {isSessionActive && (
+            <div className="setting-group">
+              <label>Current Audio Level:</label>
+              <div className="audio-level-display">
+                <div className="level-bar">
+                  <div 
+                    className="level-fill" 
+                    style={{ width: `${Math.min(audioLevel * 1000, 100)}%` }}
+                  ></div>
+                </div>
+                <span className="level-text">{(audioLevel * 1000).toFixed(1)}%</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
