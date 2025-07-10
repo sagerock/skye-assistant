@@ -49,6 +49,14 @@ const ADMIN_USERS = new Set([
   'sage@sagerock.com'
 ]);
 
+// Model pricing configuration (per 1K tokens)
+const modelPricing = {
+  'gpt-4o-realtime-preview-2025-06-03': { input: 0.005, output: 0.020 },
+  'gpt-4o-mini-realtime-preview-2024-12-17': { input: 0.00015, output: 0.0006 },
+  'gpt-4.1-mini-2025-04-14': { input: 0.00015, output: 0.0006 },
+  'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.0006 }
+};
+
 // In-memory user storage for admin management (in production, use proper database)
 const userStore = new Map();
 
@@ -306,6 +314,7 @@ async function getTokenAnalyticsFromFirestore() {
     const recentSessions = [];
     const sessionMap = new Map();
     const modelBreakdown = new Map();
+    const userModelBreakdown = new Map(); // Track model usage per user
     const eventsSnapshot = await db.collection('analytics').doc('token_usage').collection('events').orderBy('timestamp', 'desc').limit(500).get();
     
     eventsSnapshot.forEach(doc => {
@@ -313,8 +322,9 @@ async function getTokenAnalyticsFromFirestore() {
         const eventData = doc.data();
         const sessionId = eventData.sessionId;
         const model = eventData.model || 'unknown';
+        const userId = eventData.userId;
         
-        // Track model usage
+        // Track global model usage
         if (!modelBreakdown.has(model)) {
           modelBreakdown.set(model, {
             model,
@@ -333,6 +343,37 @@ async function getTokenAnalyticsFromFirestore() {
         modelData.totalRequests += 1;
         if (eventData.userId) {
           modelData.uniqueUsers.add(eventData.userId);
+        }
+        
+        // Track per-user model usage
+        if (userId) {
+          if (!userModelBreakdown.has(userId)) {
+            userModelBreakdown.set(userId, new Map());
+          }
+          
+          const userModels = userModelBreakdown.get(userId);
+          if (!userModels.has(model)) {
+            userModels.set(model, {
+              model,
+              totalTokens: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              totalRequests: 0,
+              totalCost: 0
+            });
+          }
+          
+          const userModelData = userModels.get(model);
+          userModelData.totalTokens += eventData.totalTokens || 0;
+          userModelData.inputTokens += eventData.inputTokens || 0;
+          userModelData.outputTokens += eventData.outputTokens || 0;
+          userModelData.totalRequests += 1;
+          
+          // Calculate cost using model-specific pricing
+          const pricing = modelPricing[model] || { input: 0.00015, output: 0.0006 }; // Default to mini pricing
+          const inputCost = ((eventData.inputTokens || 0) / 1000) * pricing.input;
+          const outputCost = ((eventData.outputTokens || 0) / 1000) * pricing.output;
+          userModelData.totalCost += inputCost + outputCost;
         }
         
         // Track sessions
@@ -366,7 +407,18 @@ async function getTokenAnalyticsFromFirestore() {
       }
     });
 
-    const topUsers = users.sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 20);
+    // Add model breakdown to users
+    const topUsers = users.map(user => {
+      const userModels = userModelBreakdown.get(user.userId);
+      if (userModels) {
+        const modelBreakdownArray = Array.from(userModels.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+        return {
+          ...user,
+          modelBreakdown: modelBreakdownArray
+        };
+      }
+      return user;
+    }).sort((a, b) => b.totalTokens - a.totalTokens).slice(0, 20);
 
     // Convert model breakdown to array and sort by token usage
     const modelStats = Array.from(modelBreakdown.values()).map(model => ({
@@ -816,6 +868,10 @@ async function handleAdminRequest(req, res, url) {
       await getUserConversationHistory(req, res, userId);
     } else if (url.pathname === '/admin/cleanup-analytics' && req.method === 'POST') {
       await cleanupAnalyticsEndpoint(req, res);
+    } else if (url.pathname === '/admin/pricing' && req.method === 'GET') {
+      await getPricing(req, res);
+    } else if (url.pathname === '/admin/pricing' && req.method === 'PUT') {
+      await updatePricing(req, res);
     } else {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Admin endpoint not found' }));
@@ -1059,38 +1115,52 @@ async function getUsageAnalytics(req, res) {
       return;
     }
     
-    // Calculate costs (approximate OpenAI pricing) - prices per 1K tokens
-    const modelPricing = {
-      'gpt-4o-realtime-preview-2025-06-03': { input: 0.005, output: 0.020 },
-      'gpt-4o-mini-realtime-preview-2024-12-17': { input: 0.00015, output: 0.0006 },
-      'gpt-4.1-mini-2025-04-14': { input: 0.00015, output: 0.0006 },
-      'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.0006 }
-    };
+    // Calculate costs using global modelPricing configuration
     
     let totalCost = 0;
     const costByUser = (analytics.topUsers || []).map(user => {
       let userTotalCost = 0;
       
-      // Calculate user cost based on total tokens (simplified since we removed model tracking)
-      const inputCost = ((user.inputTokens || 0) / 1000) * 0.00015; // Use mini pricing as default
-      const outputCost = ((user.outputTokens || 0) / 1000) * 0.0006;
-      userTotalCost = inputCost + outputCost;
+      // Use model-specific costs if available, otherwise fallback to simplified calculation
+      if (user.modelBreakdown && user.modelBreakdown.length > 0) {
+        userTotalCost = user.modelBreakdown.reduce((sum, model) => sum + (model.totalCost || 0), 0);
+      } else {
+        // Fallback to simplified calculation for users without model breakdown
+        const inputCost = ((user.inputTokens || 0) / 1000) * 0.00015; // Use mini pricing as default
+        const outputCost = ((user.outputTokens || 0) / 1000) * 0.0006;
+        userTotalCost = inputCost + outputCost;
+      }
+      
       totalCost += userTotalCost;
       
       return {
         ...user,
-        inputCost,
-        outputCost,
         totalCost: userTotalCost,
         avgCostPerRequest: userTotalCost / Math.max(user.totalRequests || 1, 1)
       };
     }).sort((a, b) => b.totalCost - a.totalCost);
     
+    // Calculate cost breakdown by model
+    const costByModel = (analytics.modelBreakdown || []).map(model => {
+      const pricing = modelPricing[model.model] || { input: 0.00015, output: 0.0006 };
+      const inputCost = (model.inputTokens / 1000) * pricing.input;
+      const outputCost = (model.outputTokens / 1000) * pricing.output;
+      const totalModelCost = inputCost + outputCost;
+      
+      return {
+        model: model.model,
+        totalCost: totalModelCost,
+        inputCost,
+        outputCost,
+        avgCostPerRequest: totalModelCost / Math.max(model.totalRequests, 1)
+      };
+    }).sort((a, b) => b.totalCost - a.totalCost);
+
     const usage = {
       ...analytics,
       costs: {
         totalCost,
-        costByModel: [], // No longer tracking by model
+        costByModel,
         costByUser,
         avgCostPerToken: totalCost / Math.max(analytics.global.totalTokens || 1, 1),
         avgCostPerRequest: totalCost / Math.max(analytics.global.totalRequests || 1, 1),
@@ -1189,6 +1259,72 @@ async function cleanupAnalyticsEndpoint(req, res) {
     console.error('Error cleaning up analytics:', error);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to clean up analytics' }));
+  }
+}
+
+async function getPricing(req, res) {
+  try {
+    // Return current model pricing configuration
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ pricing: modelPricing }));
+  } catch (error) {
+    console.error('Error getting pricing:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get pricing configuration' }));
+  }
+}
+
+async function updatePricing(req, res) {
+  try {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString();
+    });
+    
+    req.on('end', async () => {
+      try {
+        const { pricing } = JSON.parse(body);
+        
+        // Validate pricing data
+        if (!pricing || typeof pricing !== 'object') {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid pricing data' }));
+          return;
+        }
+        
+        // Validate each model's pricing
+        for (const [modelId, modelPricing] of Object.entries(pricing)) {
+          if (!modelPricing.input || !modelPricing.output || 
+              typeof modelPricing.input !== 'number' || 
+              typeof modelPricing.output !== 'number' ||
+              modelPricing.input < 0 || modelPricing.output < 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Invalid pricing for model: ${modelId}` }));
+            return;
+          }
+        }
+        
+        // Update the global modelPricing object
+        Object.keys(modelPricing).forEach(key => delete modelPricing[key]);
+        Object.assign(modelPricing, pricing);
+        
+        console.log('📊 Updated model pricing configuration:', modelPricing);
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          message: 'Pricing updated successfully',
+          pricing: modelPricing 
+        }));
+      } catch (parseError) {
+        console.error('Error parsing pricing update:', parseError);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON data' }));
+      }
+    });
+  } catch (error) {
+    console.error('Error updating pricing:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to update pricing configuration' }));
   }
 }
 

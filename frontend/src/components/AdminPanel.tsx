@@ -50,6 +50,14 @@ interface AdminPanelProps {
   onBack: () => void;
 }
 
+interface ModelPricing {
+  [model: string]: {
+    input: number;
+    output: number;
+    displayName?: string;
+  };
+}
+
 interface TokenUsage {
   global: {
     totalTokens: number;
@@ -67,6 +75,23 @@ interface TokenUsage {
     totalRequests: number;
     firstRequest: string;
     lastRequest: string;
+    modelBreakdown?: Array<{
+      model: string;
+      totalTokens: number;
+      inputTokens: number;
+      outputTokens: number;
+      totalRequests: number;
+      totalCost: number;
+    }>;
+  }>;
+  modelBreakdown?: Array<{
+    model: string;
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalRequests: number;
+    uniqueUsers: number;
+    avgTokensPerRequest: number;
   }>;
   costs?: {
     totalCost: number;
@@ -89,7 +114,7 @@ interface TokenUsage {
 }
 
 const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'analytics' | 'health'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'analytics' | 'pricing' | 'health'>('dashboard');
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
@@ -103,6 +128,16 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
     password: '',
     displayName: '',
     tier: 'free' as 'free' | 'premium'
+  });
+  const [expandedUsers, setExpandedUsers] = useState<Set<string>>(new Set());
+  const [pricing, setPricing] = useState<ModelPricing | null>(null);
+  const [editingPricing, setEditingPricing] = useState<ModelPricing | null>(null);
+  const [showAddModel, setShowAddModel] = useState(false);
+  const [newModel, setNewModel] = useState({
+    model: '',
+    displayName: '',
+    input: 0.00015,
+    output: 0.0006
   });
 
   const API_BASE = 'http://localhost:3001'; // Adjust based on your backend port
@@ -161,6 +196,55 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch token usage');
     }
+  };
+
+  const fetchPricing = async () => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${API_BASE}/admin/pricing`, { headers });
+      if (!response.ok) throw new Error('Failed to fetch pricing');
+      const data = await response.json();
+      setPricing(data.pricing);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch pricing');
+    }
+  };
+
+  const updatePricing = async (newPricing: ModelPricing) => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${API_BASE}/admin/pricing`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ pricing: newPricing })
+      });
+      if (!response.ok) throw new Error('Failed to update pricing');
+      
+      setPricing(newPricing);
+      setEditingPricing(null);
+      // Refresh usage data to show updated costs
+      await fetchTokenUsage();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update pricing');
+    }
+  };
+
+  const addNewModel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pricing) return;
+    
+    const updatedPricing = {
+      ...pricing,
+      [newModel.model]: {
+        input: newModel.input,
+        output: newModel.output,
+        displayName: newModel.displayName || undefined
+      }
+    };
+    
+    await updatePricing(updatedPricing);
+    setNewModel({ model: '', displayName: '', input: 0.00015, output: 0.0006 });
+    setShowAddModel(false);
   };
 
   const createUser = async (e: React.FormEvent) => {
@@ -233,7 +317,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
     const loadData = async () => {
       setLoading(true);
       try {
-        await Promise.all([fetchUsers(), fetchStats(), fetchHealth(), fetchTokenUsage()]);
+        await Promise.all([fetchUsers(), fetchStats(), fetchHealth(), fetchTokenUsage(), fetchPricing()]);
       } catch (err) {
         setError('Failed to load admin data');
       } finally {
@@ -256,6 +340,27 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
 
   const formatBytes = (bytes: number) => {
     return (bytes / 1024 / 1024).toFixed(2) + ' MB';
+  };
+
+  const formatModelName = (model: string) => {
+    const modelMap: { [key: string]: string } = {
+      'gpt-4o-realtime-preview-2025-06-03': 'GPT-4o Realtime (Premium)',
+      'gpt-4o-mini-realtime-preview-2024-12-17': 'GPT-4o Mini Realtime (Free)',
+      'gpt-4.1-mini-2025-04-14': 'GPT-4.1 Mini (Deep Synthesis)',
+      'gpt-4o-mini-2024-07-18': 'GPT-4o Mini (Lightweight)',
+      'unknown': 'Unknown Model'
+    };
+    return modelMap[model] || model;
+  };
+
+  const toggleUserExpansion = (userId: string) => {
+    const newExpanded = new Set(expandedUsers);
+    if (newExpanded.has(userId)) {
+      newExpanded.delete(userId);
+    } else {
+      newExpanded.add(userId);
+    }
+    setExpandedUsers(newExpanded);
   };
 
   if (loading) {
@@ -292,6 +397,12 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
           onClick={() => setActiveTab('analytics')}
         >
           Analytics
+        </button>
+        <button 
+          className={`tab ${activeTab === 'pricing' ? 'active' : ''}`}
+          onClick={() => setActiveTab('pricing')}
+        >
+          Pricing
         </button>
         <button 
           className={`tab ${activeTab === 'health' ? 'active' : ''}`}
@@ -561,12 +672,46 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
           </div>
 
           {/* Model Performance */}
-          <div className="analytics-section">
-            <h3>Model Performance</h3>
-            <div className="analytics-note">
-              <p>Model-specific analytics have been simplified. All usage is now tracked at the user level.</p>
+          {tokenUsage.modelBreakdown && tokenUsage.modelBreakdown.length > 0 && (
+            <div className="analytics-section">
+              <h3>Token Usage by Model</h3>
+              <div className="analytics-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Total Tokens</th>
+                      <th>Input Tokens</th>
+                      <th>Output Tokens</th>
+                      <th>Requests</th>
+                      <th>Users</th>
+                      <th>Avg Tokens/Request</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tokenUsage.modelBreakdown.map((model) => (
+                      <tr key={model.model}>
+                        <td>
+                          <div>
+                            <strong>{formatModelName(model.model)}</strong>
+                            <div className="model-meta">
+                              {model.model}
+                            </div>
+                          </div>
+                        </td>
+                        <td>{model.totalTokens.toLocaleString()}</td>
+                        <td>{model.inputTokens.toLocaleString()}</td>
+                        <td>{model.outputTokens.toLocaleString()}</td>
+                        <td>{model.totalRequests.toLocaleString()}</td>
+                        <td>{model.uniqueUsers}</td>
+                        <td>{model.avgTokensPerRequest}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Top Users */}
           <div className="analytics-section">
@@ -582,30 +727,75 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
                     <th>Requests</th>
                     <th>Avg Tokens/Request</th>
                     {tokenUsage.costs && <th>Total Cost</th>}
+                    <th>Models</th>
                   </tr>
                 </thead>
                 <tbody>
                   {tokenUsage.topUsers.slice(0, 15).map((user) => {
                     const userCost = tokenUsage.costs?.costByUser.find(c => c.email === user.email);
+                    const isExpanded = expandedUsers.has(user.userId);
                     return (
-                      <tr key={user.userId}>
-                        <td>
-                          <div>
-                            <strong>{user.email}</strong>
-                            <div className="user-meta">
-                              Last active: {formatDate(user.lastRequest)}
+                      <React.Fragment key={user.userId}>
+                        <tr className="user-row">
+                          <td>
+                            <div>
+                              <strong>{user.email}</strong>
+                              <div className="user-meta">
+                                Last active: {formatDate(user.lastRequest)}
+                              </div>
                             </div>
-                          </div>
-                        </td>
-                        <td>{user.totalTokens.toLocaleString()}</td>
-                        <td>{user.inputTokens?.toLocaleString() || '0'}</td>
-                        <td>{user.outputTokens?.toLocaleString() || '0'}</td>
-                        <td>{user.totalRequests.toLocaleString()}</td>
-                        <td>{Math.round(user.totalTokens / Math.max(user.totalRequests, 1))}</td>
-                        {tokenUsage.costs && (
-                          <td>${userCost?.totalCost.toFixed(4) || '0.00'}</td>
+                          </td>
+                          <td>{user.totalTokens.toLocaleString()}</td>
+                          <td>{user.inputTokens?.toLocaleString() || '0'}</td>
+                          <td>{user.outputTokens?.toLocaleString() || '0'}</td>
+                          <td>{user.totalRequests.toLocaleString()}</td>
+                          <td>{Math.round(user.totalTokens / Math.max(user.totalRequests, 1))}</td>
+                          {tokenUsage.costs && (
+                            <td>${userCost?.totalCost.toFixed(4) || '0.00'}</td>
+                          )}
+                          <td>
+                            <button 
+                              className="expand-button"
+                              onClick={() => toggleUserExpansion(user.userId)}
+                              title={isExpanded ? 'Hide model breakdown' : 'Show model breakdown'}
+                            >
+                              {user.modelBreakdown && user.modelBreakdown.length > 0 ? (
+                                <>
+                                  {user.modelBreakdown.length} model{user.modelBreakdown.length > 1 ? 's' : ''}
+                                  <span className={`expand-icon ${isExpanded ? 'expanded' : ''}`}>▼</span>
+                                </>
+                              ) : (
+                                'No data'
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                        {isExpanded && user.modelBreakdown && user.modelBreakdown.length > 0 && (
+                          user.modelBreakdown.map((modelData, index) => (
+                            <tr key={`${user.userId}-${modelData.model}`} className="model-breakdown-row">
+                              <td className="model-breakdown-cell">
+                                <div className="model-info">
+                                  <strong>{formatModelName(modelData.model)}</strong>
+                                  <div className="model-meta">{modelData.model}</div>
+                                </div>
+                              </td>
+                              <td>{modelData.totalTokens.toLocaleString()}</td>
+                              <td>{modelData.inputTokens?.toLocaleString() || '0'}</td>
+                              <td>{modelData.outputTokens?.toLocaleString() || '0'}</td>
+                              <td>{modelData.totalRequests.toLocaleString()}</td>
+                              <td>{Math.round(modelData.totalTokens / Math.max(modelData.totalRequests, 1))}</td>
+                              {tokenUsage.costs && (
+                                <td>${modelData.totalCost?.toFixed(4) || '0.00'}</td>
+                              )}
+                              <td>
+                                <span className="model-badge">
+                                  {((modelData.totalTokens / user.totalTokens) * 100).toFixed(1)}%
+                                </span>
+                              </td>
+                            </tr>
+                          ))
                         )}
-                      </tr>
+                      </React.Fragment>
                     );
                   })}
                 </tbody>
@@ -633,6 +823,206 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'pricing' && pricing && (
+        <div className="admin-pricing">
+          <div className="pricing-header">
+            <h2>Model Pricing Configuration</h2>
+            <button 
+              className="add-model-button"
+              onClick={() => setShowAddModel(true)}
+            >
+              Add Model
+            </button>
+          </div>
+
+          {showAddModel && (
+            <div className="modal-overlay">
+              <div className="modal">
+                <h3>Add New Model</h3>
+                <form onSubmit={addNewModel}>
+                  <div className="form-group">
+                    <label>Model ID</label>
+                    <input
+                      type="text"
+                      value={newModel.model}
+                      onChange={(e) => setNewModel({...newModel, model: e.target.value})}
+                      placeholder="e.g., gpt-4o-turbo-2024-04-09"
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Display Name (Optional)</label>
+                    <input
+                      type="text"
+                      value={newModel.displayName}
+                      onChange={(e) => setNewModel({...newModel, displayName: e.target.value})}
+                      placeholder="e.g., GPT-4o Turbo"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Input Token Price (per 1K tokens)</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      value={newModel.input}
+                      onChange={(e) => setNewModel({...newModel, input: parseFloat(e.target.value)})}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Output Token Price (per 1K tokens)</label>
+                    <input
+                      type="number"
+                      step="0.000001"
+                      value={newModel.output}
+                      onChange={(e) => setNewModel({...newModel, output: parseFloat(e.target.value)})}
+                      required
+                    />
+                  </div>
+                  <div className="modal-actions">
+                    <button type="button" onClick={() => setShowAddModel(false)}>Cancel</button>
+                    <button type="submit">Add Model</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          <div className="pricing-table">
+            <div className="pricing-actions">
+              {editingPricing ? (
+                <div className="editing-actions">
+                  <button 
+                    className="save-button"
+                    onClick={() => updatePricing(editingPricing)}
+                  >
+                    Save Changes
+                  </button>
+                  <button 
+                    className="cancel-button"
+                    onClick={() => setEditingPricing(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button 
+                  className="edit-button"
+                  onClick={() => setEditingPricing({...pricing})}
+                >
+                  Edit Pricing
+                </button>
+              )}
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Display Name</th>
+                  <th>Input Price (per 1K)</th>
+                  <th>Output Price (per 1K)</th>
+                  <th>Cost Ratio</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(pricing).map(([modelId, modelPricing]) => (
+                  <tr key={modelId}>
+                    <td>
+                      <div className="model-id">
+                        <code>{modelId}</code>
+                      </div>
+                    </td>
+                    <td>
+                      {editingPricing ? (
+                        <input
+                          type="text"
+                          value={editingPricing[modelId]?.displayName || ''}
+                          onChange={(e) => setEditingPricing({
+                            ...editingPricing,
+                            [modelId]: {
+                              ...editingPricing[modelId],
+                              displayName: e.target.value
+                            }
+                          })}
+                          placeholder="Display name"
+                        />
+                      ) : (
+                        <span>{formatModelName(modelId)}</span>
+                      )}
+                    </td>
+                    <td>
+                      {editingPricing ? (
+                        <input
+                          type="number"
+                          step="0.000001"
+                          value={editingPricing[modelId]?.input || 0}
+                          onChange={(e) => setEditingPricing({
+                            ...editingPricing,
+                            [modelId]: {
+                              ...editingPricing[modelId],
+                              input: parseFloat(e.target.value) || 0
+                            }
+                          })}
+                          className="price-input"
+                        />
+                      ) : (
+                        <span className="price-display">${modelPricing.input.toFixed(6)}</span>
+                      )}
+                    </td>
+                    <td>
+                      {editingPricing ? (
+                        <input
+                          type="number"
+                          step="0.000001"
+                          value={editingPricing[modelId]?.output || 0}
+                          onChange={(e) => setEditingPricing({
+                            ...editingPricing,
+                            [modelId]: {
+                              ...editingPricing[modelId],
+                              output: parseFloat(e.target.value) || 0
+                            }
+                          })}
+                          className="price-input"
+                        />
+                      ) : (
+                        <span className="price-display">${modelPricing.output.toFixed(6)}</span>
+                      )}
+                    </td>
+                    <td>
+                      <span className="cost-ratio">
+                        {(modelPricing.output / modelPricing.input).toFixed(1)}x
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="pricing-info">
+            <div className="info-card">
+              <h3>Pricing Notes</h3>
+              <ul>
+                <li>All prices are per 1,000 tokens</li>
+                <li>Output tokens are typically more expensive than input tokens</li>
+                <li>Changes apply immediately to all new cost calculations</li>
+                <li>Historical costs are not recalculated</li>
+              </ul>
+            </div>
+            <div className="info-card">
+              <h3>Current OpenAI Pricing (Reference)</h3>
+              <ul>
+                <li><strong>GPT-4o Realtime:</strong> $0.005 input, $0.020 output</li>
+                <li><strong>GPT-4o Mini:</strong> $0.00015 input, $0.0006 output</li>
+                <li><strong>GPT-4 Turbo:</strong> $0.01 input, $0.03 output</li>
+                <li>Check OpenAI pricing page for latest rates</li>
+              </ul>
+            </div>
+          </div>
         </div>
       )}
 
