@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Skye Assistant is a real-time, browser-based voice AI assistant built on OpenAI's `gpt-4o-mini-realtime-preview` model. The project supports spoken conversations with persistent memory and Retrieval-Augmented Generation (RAG), with user authentication via Firebase.
 
-**Current Status**: Advanced real-time voice conversation system with GPT-4o Mini Realtime API complete and functional.
+**Current Status**: Advanced real-time voice conversation system with GPT-4o Mini Realtime API complete and functional. Comprehensive tier-based service restrictions implemented.
 
 ## Development Commands
 
@@ -38,6 +38,11 @@ Skye Assistant is a real-time, browser-based voice AI assistant built on OpenAI'
 - ✅ OpenAI GPT-4o-mini integration with speech-to-text (working-ai-server.js)
 - ✅ OpenAI GPT-4o-mini Realtime API with direct audio streaming (realtime-server.js)
 - ✅ Real-time voice conversation system fully functional
+- ✅ **Tier-based service restrictions implemented**
+  - Free tier: 5 sessions/hour, 20/day, 10-min sessions, 50K tokens/day, 1 concurrent
+  - Premium tier: 50 sessions/hour, 200/day, 1-hour sessions, 500K tokens/day, 3 concurrent
+  - Real-time limit enforcement and session monitoring
+  - Admin panel for user limit management
 
 ### Voice Interfaces
 - `frontend/skye-test.html` - Speech-to-text with intelligent text responses
@@ -57,6 +62,8 @@ Skye Assistant is a real-time, browser-based voice AI assistant built on OpenAI'
 - Integrates with Zep Cloud for persistent memory
 - Integrates with Qdrant Cloud for RAG functionality
 - Streams responses back to client
+- **Tier-based service restrictions and usage tracking**
+- Real-time session monitoring and enforcement
 
 ## External Services Integration
 
@@ -89,6 +96,72 @@ The assistant should be configured as "Skye, a kind and attentive AI assistant" 
 - Supports voice interaction with respectful conversation flow
 - Personalizes replies using available context
 
+## Tier-Based Service System
+
+### Service Tiers
+
+#### **Free Tier**
+- 5 sessions per hour
+- 20 sessions per day
+- 10-minute session duration limit
+- 50,000 tokens per day
+- 1 concurrent session
+- GPT-4o Mini model
+- Basic features
+
+#### **Premium Tier**
+- 50 sessions per hour
+- 200 sessions per day  
+- 1-hour session duration limit
+- 500,000 tokens per day
+- 3 concurrent sessions
+- GPT-4o model (enhanced)
+- Advanced features and priority support
+
+### Implementation Details
+
+#### **Backend Enforcement** (`realtime-server.js`)
+- Session limits checked before connection (`canUserStartSession`)
+- Token usage tracked and validated (`canUserUseTokens`, `recordTokenUsage`)
+- Real-time session monitoring every 30 seconds
+- Automatic session termination for duration limits
+- Concurrent session tracking per user
+
+#### **Frontend Integration** (`RealtimeInterface.tsx`)
+- Tier badge display with upgrade prompts
+- Real-time limit information
+- Enhanced error messages for limit violations
+- Graceful degradation when limits reached
+
+#### **Admin Panel** (`AdminPanel.tsx`)
+- `/admin/limits` endpoint for usage monitoring
+- Real-time session tracking
+- User tier management
+- Usage analytics and cost tracking
+
+#### **Database Schema**
+```javascript
+// User limits tracking (in-memory)
+userLimits: {
+  daily: { tokensUsed, sessionsStarted, resetTime },
+  hourly: { sessionsStarted, resetTime },
+  activeSessions: Set(),
+  sessionStartTimes: Map()
+}
+
+// Firestore analytics
+analytics/token_usage/events/: { userId, sessionId, model, tokens, timestamp }
+analytics/token_usage/users/: { userId, totalTokens, totalRequests }
+analytics/token_usage/global/: { totalTokens, totalRequests }
+```
+
+### Key Features
+- **Smart Resets**: Automatic daily/hourly limit resets
+- **Real-time Monitoring**: Live session tracking and termination
+- **User Experience**: Clear messaging and upgrade paths
+- **Admin Visibility**: Comprehensive usage analytics
+- **Security**: Proper validation at all entry points
+
 ## Tech Stack
 
 - **Frontend**: React, WebRTC, Firebase Auth
@@ -96,3 +169,4 @@ The assistant should be configured as "Skye, a kind and attentive AI assistant" 
 - **Memory**: Zep Cloud
 - **RAG**: Qdrant Cloud
 - **AI Model**: GPT-4o-mini-realtime-preview
+- **Usage Tracking**: Firestore analytics with real-time limits

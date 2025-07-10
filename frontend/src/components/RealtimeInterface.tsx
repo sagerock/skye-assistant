@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { auth } from '../firebase'; // Corrected import path
 
 // Define a type for the message objects
@@ -17,13 +17,12 @@ const RealtimeInterface = () => {
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [audioInputDevices, setAudioInputDevices] = useState<MediaDeviceInfo[]>([]);
   const [audioOutputDevices, setAudioOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [userTier, setUserTier] = useState<string>('free');
+  const [tierLimits, setTierLimits] = useState<any>(null);
   
   const ws = useRef<WebSocket | null>(null);
-  const mediaRecorder = useRef<MediaRecorder | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
-  const audioQueue = useRef<any[]>([]); // A more specific type can be used
   const connectionInitialized = useRef<boolean>(false); // Add connection guard
-  let isPlaying = false;
   let nextStartTime = 0;
 
   const addMessage = (type: Message['type'], content: string) => {
@@ -113,7 +112,14 @@ const RealtimeInterface = () => {
             setStatusClass('connected');
             addMessage('system', data.message);
             if (data.tier) {
-              addMessage('system', `You have ${data.tier} access${data.tier === 'premium' ? ' - enhanced conversations enabled.' : '.'}`);
+              setUserTier(data.tier);
+              const tierMessage = data.tier === 'premium' 
+                ? `You have ${data.tier} access - enhanced conversations enabled.`
+                : `You have ${data.tier} access. Upgrade to premium for longer sessions and advanced features.`;
+              addMessage('system', tierMessage);
+            }
+            if (data.limits) {
+              setTierLimits(data.limits);
             }
           } else if (data.type === 'auth_error') {
             setStatus('Connection failed. Please try again.');
@@ -150,8 +156,33 @@ const RealtimeInterface = () => {
             addMessage('system', data.message);
             setStatus('Session ended.');
             setStatusClass('');
+          } else if (data.type === 'session_terminated') {
+            addMessage('system', `Session terminated: ${data.message}`);
+            if (data.reason === 'duration_limit') {
+              addMessage('system', userTier === 'premium' 
+                ? 'Consider taking a break and starting a new session.' 
+                : 'Upgrade to premium for longer session durations.');
+            }
+            setStatus('Session ended due to limits.');
+            setStatusClass('error');
+            setIsSessionActive(false);
           } else if (data.type === 'error') {
-            addMessage('system', `Error: ${data.message}`);
+            if (data.reason === 'concurrent_limit' || data.reason === 'daily_limit' || data.reason === 'hourly_limit' || data.reason === 'token_limit') {
+              addMessage('system', `Limit reached: ${data.message}`);
+              if (data.tier && data.limits) {
+                const limits = data.limits;
+                if (data.tier === 'free') {
+                  addMessage('system', `Free tier limits: ${limits.sessionsPerDay} sessions/day, ${limits.sessionsPerHour} sessions/hour, ${Math.round(limits.maxSessionDuration/60000)} min/session`);
+                  addMessage('system', 'Upgrade to premium for higher limits and longer sessions.');
+                } else {
+                  addMessage('system', `Premium limits: ${limits.sessionsPerDay} sessions/day, ${limits.sessionsPerHour} sessions/hour, ${Math.round(limits.maxSessionDuration/60000)} min/session`);
+                }
+              }
+              setStatus('Limit reached. Try again later or upgrade.');
+              setStatusClass('error');
+            } else {
+              addMessage('system', `Error: ${data.message}`);
+            }
           } else {
             // Log unknown message types for debugging but don't show error to user
             console.log('Unknown message type from server:', data.type, data);
@@ -307,6 +338,26 @@ const RealtimeInterface = () => {
         </div>
       </div>
 
+      {/* Tier Information Display */}
+      <div className="tier-info">
+        <div className={`tier-badge ${userTier}`}>
+          <span className="tier-label">{userTier.toUpperCase()}</span>
+          {userTier === 'free' && (
+            <button className="upgrade-btn" onClick={() => window.open('mailto:contact@skye.ai?subject=Premium Upgrade', '_blank')}>
+              Upgrade
+            </button>
+          )}
+        </div>
+        {tierLimits && (
+          <div className="tier-limits">
+            <span>{tierLimits.sessionsPerDay} sessions/day</span>
+            <span>{tierLimits.sessionsPerHour} sessions/hour</span>
+            <span>{Math.round(tierLimits.maxSessionDuration / 60000)} min/session</span>
+            {userTier === 'premium' && <span>Advanced features enabled</span>}
+          </div>
+        )}
+      </div>
+
       <div className="controls">
         <div className="realtime-controls">
           <button 
@@ -340,9 +391,9 @@ const RealtimeInterface = () => {
           <h3>Preferences</h3>
           <div>
             <label htmlFor="voice-select">Skye's Voice:</label>
-            <select id="voice-select" defaultValue="sage">
-              <option value="sage">Sage (Recommended)</option>
-              <option value="shimmer">Shimmer</option>
+            <select id="voice-select" defaultValue="shimmer">
+              <option value="shimmer">Shimmer (Recommended)</option>
+              <option value="sage">Sage</option>
               <option value="coral">Coral</option>
               <option value="alloy">Alloy</option>
               <option value="ash">Ash</option>

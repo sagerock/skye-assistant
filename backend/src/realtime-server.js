@@ -57,8 +57,31 @@ const modelPricing = {
   'gpt-4o-mini-2024-07-18': { input: 0.00015, output: 0.0006 }
 };
 
+// Tier-based service limits
+const TIER_LIMITS = {
+  free: {
+    sessionsPerHour: 5,
+    sessionsPerDay: 20,
+    maxSessionDuration: 10 * 60 * 1000, // 10 minutes in milliseconds
+    tokensPerDay: 50000,
+    maxConcurrentSessions: 1,
+    features: ['basic_voice', 'short_memory']
+  },
+  premium: {
+    sessionsPerHour: 50,
+    sessionsPerDay: 200,
+    maxSessionDuration: 60 * 60 * 1000, // 1 hour in milliseconds
+    tokensPerDay: 500000,
+    maxConcurrentSessions: 3,
+    features: ['enhanced_voice', 'long_memory', 'priority_support', 'advanced_models']
+  }
+};
+
 // In-memory user storage for admin management (in production, use proper database)
 const userStore = new Map();
+
+// User session limits tracking
+const userLimits = new Map(); // userId -> { daily: {...}, hourly: {...}, sessions: Set() }
 
 // TOKEN USAGE TRACKING SYSTEM
 const tokenUsage = {
@@ -78,6 +101,11 @@ function trackTokenUsage(userId, email, sessionId, model, inputTokens = 0, outpu
   const timestamp = new Date().toISOString();
   
   console.log(`📊 Token usage: ${email} | In: ${inputTokens}, Out: ${outputTokens}, Total: ${totalTokens} | Event: ${eventType}`);
+  
+  // Record token usage for tier limits
+  if (totalTokens > 0) {
+    recordTokenUsage(userId, totalTokens);
+  }
   
   // Track by user
   if (!tokenUsage.byUser.has(userId)) {
@@ -792,7 +820,219 @@ function getUserTier(email) {
   return 'free';
 }
 
+// TIER-BASED LIMIT ENFORCEMENT FUNCTIONS
+
+// Initialize user limits if not exists
+function initializeUserLimits(userId) {
+  if (!userLimits.has(userId)) {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const hourStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), now.getHours());
+    
+    userLimits.set(userId, {
+      daily: {
+        tokensUsed: 0,
+        sessionsStarted: 0,
+        resetTime: todayStart.getTime() + 24 * 60 * 60 * 1000
+      },
+      hourly: {
+        sessionsStarted: 0,
+        resetTime: hourStart.getTime() + 60 * 60 * 1000
+      },
+      activeSessions: new Set(),
+      sessionStartTimes: new Map() // sessionId -> startTime
+    });
+  }
+}
+
+// Reset limits if time has passed
+function resetUserLimitsIfNeeded(userId) {
+  const limits = userLimits.get(userId);
+  if (!limits) return;
+  
+  const now = Date.now();
+  
+  // Reset daily limits
+  if (now >= limits.daily.resetTime) {
+    limits.daily.tokensUsed = 0;
+    limits.daily.sessionsStarted = 0;
+    limits.daily.resetTime = now + 24 * 60 * 60 * 1000;
+  }
+  
+  // Reset hourly limits
+  if (now >= limits.hourly.resetTime) {
+    limits.hourly.sessionsStarted = 0;
+    limits.hourly.resetTime = now + 60 * 60 * 1000;
+  }
+}
+
+// Check if user can start a new session
+function canUserStartSession(userId, userTier) {
+  initializeUserLimits(userId);
+  resetUserLimitsIfNeeded(userId);
+  
+  const limits = userLimits.get(userId);
+  const tierLimits = TIER_LIMITS[userTier];
+  
+  // Check concurrent sessions
+  if (limits.activeSessions.size >= tierLimits.maxConcurrentSessions) {
+    return {
+      allowed: false,
+      reason: 'concurrent_limit',
+      message: `${userTier} tier allows maximum ${tierLimits.maxConcurrentSessions} concurrent session(s). Currently: ${limits.activeSessions.size}`
+    };
+  }
+  
+  // Check daily session limit
+  if (limits.daily.sessionsStarted >= tierLimits.sessionsPerDay) {
+    return {
+      allowed: false,
+      reason: 'daily_limit',
+      message: `${userTier} tier allows maximum ${tierLimits.sessionsPerDay} sessions per day. Used: ${limits.daily.sessionsStarted}`
+    };
+  }
+  
+  // Check hourly session limit
+  if (limits.hourly.sessionsStarted >= tierLimits.sessionsPerHour) {
+    return {
+      allowed: false,
+      reason: 'hourly_limit',
+      message: `${userTier} tier allows maximum ${tierLimits.sessionsPerHour} sessions per hour. Used: ${limits.hourly.sessionsStarted}`
+    };
+  }
+  
+  return { allowed: true };
+}
+
+// Check if user can use tokens
+function canUserUseTokens(userId, userTier, tokenCount) {
+  initializeUserLimits(userId);
+  resetUserLimitsIfNeeded(userId);
+  
+  const limits = userLimits.get(userId);
+  const tierLimits = TIER_LIMITS[userTier];
+  
+  if (limits.daily.tokensUsed + tokenCount > tierLimits.tokensPerDay) {
+    return {
+      allowed: false,
+      reason: 'token_limit',
+      message: `${userTier} tier allows maximum ${tierLimits.tokensPerDay} tokens per day. Used: ${limits.daily.tokensUsed}, Requested: ${tokenCount}`
+    };
+  }
+  
+  return { allowed: true };
+}
+
+// Record session start
+function recordSessionStart(userId, sessionId) {
+  initializeUserLimits(userId);
+  resetUserLimitsIfNeeded(userId);
+  
+  const limits = userLimits.get(userId);
+  limits.activeSessions.add(sessionId);
+  limits.sessionStartTimes.set(sessionId, Date.now());
+  limits.daily.sessionsStarted++;
+  limits.hourly.sessionsStarted++;
+  
+  console.log(`📊 Session started: ${sessionId} | User: ${userId} | Active: ${limits.activeSessions.size} | Daily: ${limits.daily.sessionsStarted} | Hourly: ${limits.hourly.sessionsStarted}`);
+}
+
+// Record session end
+function recordSessionEnd(userId, sessionId) {
+  const limits = userLimits.get(userId);
+  if (limits) {
+    limits.activeSessions.delete(sessionId);
+    const startTime = limits.sessionStartTimes.get(sessionId);
+    limits.sessionStartTimes.delete(sessionId);
+    
+    const duration = startTime ? Date.now() - startTime : 0;
+    console.log(`📊 Session ended: ${sessionId} | User: ${userId} | Duration: ${Math.round(duration / 1000)}s | Active: ${limits.activeSessions.size}`);
+  }
+}
+
+// Record token usage for limits
+function recordTokenUsage(userId, tokenCount) {
+  initializeUserLimits(userId);
+  resetUserLimitsIfNeeded(userId);
+  
+  const limits = userLimits.get(userId);
+  limits.daily.tokensUsed += tokenCount;
+}
+
+// Check if session should be terminated due to duration limits
+function shouldTerminateSession(userId, sessionId, userTier) {
+  const limits = userLimits.get(userId);
+  if (!limits) return false;
+  
+  const startTime = limits.sessionStartTimes.get(sessionId);
+  if (!startTime) return false;
+  
+  const duration = Date.now() - startTime;
+  const maxDuration = TIER_LIMITS[userTier].maxSessionDuration;
+  
+  return duration >= maxDuration;
+}
+
+// Get user limits status for admin panel
+function getUserLimitsStatus(userId) {
+  const limits = userLimits.get(userId);
+  if (!limits) return null;
+  
+  resetUserLimitsIfNeeded(userId);
+  
+  return {
+    daily: {
+      tokensUsed: limits.daily.tokensUsed,
+      sessionsStarted: limits.daily.sessionsStarted,
+      resetTime: new Date(limits.daily.resetTime).toISOString()
+    },
+    hourly: {
+      sessionsStarted: limits.hourly.sessionsStarted,
+      resetTime: new Date(limits.hourly.resetTime).toISOString()
+    },
+    activeSessions: limits.activeSessions.size,
+    sessionDetails: Array.from(limits.sessionStartTimes.entries()).map(([sessionId, startTime]) => ({
+      sessionId,
+      startTime: new Date(startTime).toISOString(),
+      duration: Date.now() - startTime
+    }))
+  };
+}
+
 console.log('🚀 Initializing GPT-4o Mini Realtime Server...');
+
+// Session duration monitoring - check every 30 seconds
+setInterval(() => {
+  const now = Date.now();
+  const activeConnections = Array.from(wss.clients);
+  
+  activeConnections.forEach(clientWs => {
+    // Check if this client has userSession data
+    if (clientWs.userSession && clientWs.userSession.authenticated) {
+      const userId = clientWs.userSession.uid;
+      const sessionId = clientWs.userSession.sessionId;
+      const userTier = clientWs.userSession.tier;
+      
+      if (shouldTerminateSession(userId, sessionId, userTier)) {
+        const maxDuration = TIER_LIMITS[userTier].maxSessionDuration;
+        const durationMinutes = Math.round(maxDuration / 60000);
+        
+        console.log(`⏰ Terminating session for ${clientWs.userSession.email}: ${durationMinutes}min limit reached`);
+        
+        // Send termination notice
+        clientWs.send(JSON.stringify({
+          type: 'session_terminated',
+          reason: 'duration_limit',
+          message: `Session terminated: ${userTier} tier has a ${durationMinutes}-minute limit per session`,
+          maxDuration: maxDuration
+        }));
+        
+        // Close the connection
+        clientWs.close();
+      }
+    }
+  });
+}, 30000); // Check every 30 seconds
 
 // Create HTTP server with admin endpoints
 const server = http.createServer(async (req, res) => {
@@ -867,6 +1107,8 @@ async function handleAdminRequest(req, res, url) {
       await getTokenStats(req, res);
     } else if (url.pathname === '/admin/usage' && req.method === 'GET') {
       await getUsageAnalytics(req, res);
+    } else if (url.pathname === '/admin/limits' && req.method === 'GET') {
+      await getUserLimits(req, res);
     } else if (url.pathname === '/debug/cost-analytics' && req.method === 'GET') {
       // Temporary debug endpoint without authentication
       console.log('🔍 Debug: Fetching cost analytics...');
@@ -1512,6 +1754,63 @@ async function getUserDetails(req, res, userId) {
   }
 }
 
+// Get user limits endpoint for admin panel
+async function getUserLimits(req, res) {
+  try {
+    const auth = getAuth();
+    const users = [];
+    
+    // Get all users from Firebase
+    const userRecords = await auth.listUsers();
+    
+    for (const userRecord of userRecords.users) {
+      const userId = userRecord.uid;
+      const userTier = getUserTier(userRecord.email);
+      const limitsStatus = getUserLimitsStatus(userId);
+      
+      // Get current session count from active connections
+      const activeConnections = Array.from(wss.clients);
+      const userActiveSessions = activeConnections.filter(ws => 
+        ws.userSession && ws.userSession.uid === userId
+      ).length;
+      
+      users.push({
+        uid: userRecord.uid,
+        email: userRecord.email,
+        displayName: userRecord.displayName,
+        tier: userTier,
+        tierLimits: TIER_LIMITS[userTier],
+        currentUsage: limitsStatus || {
+          daily: { tokensUsed: 0, sessionsStarted: 0, resetTime: null },
+          hourly: { sessionsStarted: 0, resetTime: null },
+          activeSessions: 0,
+          sessionDetails: []
+        },
+        realTimeActiveSessions: userActiveSessions,
+        disabled: userRecord.disabled,
+        creationTime: userRecord.metadata.creationTime,
+        lastSignInTime: userRecord.metadata.lastSignInTime
+      });
+    }
+    
+    // Sort by most active first
+    users.sort((a, b) => 
+      (b.currentUsage.daily.sessionsStarted || 0) - (a.currentUsage.daily.sessionsStarted || 0)
+    );
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      users,
+      tierLimits: TIER_LIMITS,
+      timestamp: new Date().toISOString()
+    }));
+  } catch (error) {
+    console.error('Error getting user limits:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get user limits' }));
+  }
+}
+
 const wss = new WebSocketServer({ server });
 
 // User creation lock to prevent race conditions
@@ -1534,6 +1833,9 @@ wss.on('connection', (clientWs) => {
     model: null,
     lastUserMessage: null
   };
+  
+  // Attach userSession to clientWs for session monitoring
+  clientWs.userSession = userSession;
   
   // Send welcome message
   clientWs.send(JSON.stringify({
@@ -1896,6 +2198,23 @@ wss.on('connection', (clientWs) => {
       }));
       return;
     }
+
+    // Check tier-based limits before starting session
+    const sessionCheck = canUserStartSession(userSession.uid, userSession.tier);
+    if (!sessionCheck.allowed) {
+      console.log(`🚫 Session blocked for ${userSession.email}: ${sessionCheck.reason}`);
+      clientWs.send(JSON.stringify({
+        type: 'error',
+        message: sessionCheck.message,
+        reason: sessionCheck.reason,
+        tier: userSession.tier,
+        limits: TIER_LIMITS[userSession.tier]
+      }));
+      return;
+    }
+
+    // Record session start for limits tracking
+    recordSessionStart(userSession.uid, userSession.sessionId);
 
     try {
       console.log(`🔗 Connecting to OpenAI Realtime API for user: ${userSession.email}...`);
@@ -2273,6 +2592,11 @@ Remember to reference previous conversations naturally and build on established 
         console.log('OpenAI WebSocket connection closed');
         isConnected = false;
         
+        // Clean up session limits tracking
+        if (userSession.authenticated && userSession.sessionId) {
+          recordSessionEnd(userSession.uid, userSession.sessionId);
+        }
+        
         // Complete the Firestore conversation
         if (userSession.conversationId) {
           try {
@@ -2343,6 +2667,12 @@ Remember to reference previous conversations naturally and build on established 
 
   clientWs.on('close', () => {
     console.log('Client disconnected');
+    
+    // Clean up session limits tracking
+    if (userSession.authenticated && userSession.sessionId) {
+      recordSessionEnd(userSession.uid, userSession.sessionId);
+    }
+    
     if (openaiWs) {
       openaiWs.close();
       openaiWs = null;
