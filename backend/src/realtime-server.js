@@ -675,16 +675,23 @@ async function completeConversation(conversationId, userId) {
 // Get conversation history for a user (user-organized)
 async function getUserConversations(userId, limit = 20) {
   try {
+    console.log(`🔍 Looking for conversations in: users/${userId}/conversations`);
+    
     const conversationsSnapshot = await db.collection('users').doc(userId).collection('conversations')
       .orderBy('startTime', 'desc')
       .limit(limit)
       .get();
     
+    console.log(`📊 Raw conversations query returned ${conversationsSnapshot.size} documents`);
+    
     const conversations = [];
     conversationsSnapshot.forEach(doc => {
-      conversations.push({ id: doc.id, ...doc.data() });
+      const data = doc.data();
+      console.log(`📄 Conversation doc: ${doc.id}`, data);
+      conversations.push({ id: doc.id, ...data });
     });
     
+    console.log(`✅ Processed ${conversations.length} conversations for user ${userId}`);
     return conversations;
   } catch (error) {
     console.error('Error getting user conversations:', error);
@@ -1048,6 +1055,13 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://${req.headers.host}`);
+  
+  // User profile endpoints (authenticated but not admin-only)
+  if (url.pathname.startsWith('/user')) {
+    console.log(`🔍 User endpoint hit: ${url.pathname}`);
+    await handleUserRequest(req, res, url);
+    return;
+  }
   
   // Admin endpoints
   if (url.pathname.startsWith('/admin')) {
@@ -1808,6 +1822,196 @@ async function getUserLimits(req, res) {
     console.error('Error getting user limits:', error);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to get user limits' }));
+  }
+}
+
+// USER PROFILE ENDPOINTS (Non-admin)
+async function handleUserRequest(req, res, url) {
+  try {
+    console.log(`🔍 handleUserRequest called for: ${url.pathname}`);
+    
+    // Verify user authentication
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('❌ No auth header found');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Authentication required' }));
+      return;
+    }
+
+    const token = authHeader.split(' ')[1];
+    console.log(`🔐 Verifying token for user endpoint`);
+    
+    const auth = getAuth();
+    const decodedToken = await auth.verifyIdToken(token);
+    const userId = decodedToken.uid;
+    const userEmail = decodedToken.email;
+    
+    console.log(`✅ User authenticated: ${userEmail} (${userId})`);
+
+    // Route user requests
+    if (url.pathname === '/user/profile' && req.method === 'GET') {
+      await getUserProfile(req, res, userId, userEmail);
+    } else if (url.pathname === '/user/conversations' && req.method === 'GET') {
+      await getUserConversationsEndpoint(req, res, userId);
+    } else if (url.pathname.startsWith('/user/conversations/') && req.method === 'GET') {
+      const conversationId = url.pathname.split('/')[3];
+      await getUserConversationMessages(req, res, conversationId, userId);
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User endpoint not found' }));
+    }
+  } catch (error) {
+    console.error('Error in user request:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Internal server error' }));
+  }
+}
+
+// Get user profile data
+async function getUserProfile(req, res, userId, userEmail) {
+  try {
+    console.log(`📊 getUserProfile called for: ${userEmail} (${userId})`);
+    
+    // Get user from Firebase
+    const auth = getAuth();
+    const userRecord = await auth.getUser(userId);
+    console.log(`✅ Firebase user record found: ${userRecord.email}`);
+    
+    const userTier = getUserTier(userEmail);
+    const limitsStatus = getUserLimitsStatus(userId);
+    
+    // Get user analytics from token usage
+    let userAnalytics = {
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalRequests: 0,
+      totalCost: 0,
+      firstRequest: null,
+      lastRequest: null,
+      avgTokensPerRequest: 0,
+      avgCostPerToken: 0
+    };
+
+    // Get token usage analytics for this user
+    try {
+      const userTokenRef = db.collection('analytics').doc('token_usage').collection('users').doc(userId);
+      const userTokenDoc = await userTokenRef.get();
+      
+      if (userTokenDoc.exists) {
+        const tokenData = userTokenDoc.data();
+        userAnalytics = {
+          totalTokens: tokenData.totalTokens || 0,
+          inputTokens: tokenData.inputTokens || 0,
+          outputTokens: tokenData.outputTokens || 0,
+          totalRequests: tokenData.totalRequests || 0,
+          firstRequest: tokenData.firstRequest,
+          lastRequest: tokenData.lastRequest,
+          avgTokensPerRequest: tokenData.totalRequests > 0 ? Math.round(tokenData.totalTokens / tokenData.totalRequests) : 0,
+          totalCost: 0, // Will calculate below
+          avgCostPerToken: 0
+        };
+        
+        // Calculate costs based on model usage
+        for (const [model, pricing] of Object.entries(modelPricing)) {
+          const inputCost = (userAnalytics.inputTokens / 1000) * pricing.input;
+          const outputCost = (userAnalytics.outputTokens / 1000) * pricing.output;
+          userAnalytics.totalCost += inputCost + outputCost;
+        }
+        
+        userAnalytics.avgCostPerToken = userAnalytics.totalTokens > 0 ? userAnalytics.totalCost / userAnalytics.totalTokens : 0;
+      }
+    } catch (analyticsError) {
+      console.warn('Could not get user analytics:', analyticsError.message);
+    }
+
+    // Get user conversations (last 20)
+    console.log(`📊 Fetching conversations for user: ${userId}`);
+    const conversations = await getUserConversations(userId, 20);
+    console.log(`📊 Found ${conversations.length} conversations for user: ${userEmail}`);
+
+    // Get active session count
+    const activeConnections = Array.from(wss.clients);
+    const userActiveSessions = activeConnections.filter(ws => 
+      ws.userSession && ws.userSession.uid === userId
+    ).length;
+
+    const userProfile = {
+      user: {
+        uid: userRecord.uid,
+        email: userRecord.email,
+        displayName: userRecord.displayName,
+        tier: userTier,
+        creationTime: userRecord.metadata.creationTime,
+        lastSignInTime: userRecord.metadata.lastSignInTime,
+        disabled: userRecord.disabled
+      },
+      analytics: userAnalytics,
+      conversations,
+      limits: {
+        tierLimits: TIER_LIMITS[userTier],
+        currentUsage: limitsStatus || {
+          daily: { tokensUsed: 0, sessionsStarted: 0, resetTime: null },
+          hourly: { sessionsStarted: 0, resetTime: null },
+          activeSessions: 0,
+          sessionDetails: []
+        },
+        activeSessions: userActiveSessions
+      }
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ profile: userProfile }));
+  } catch (error) {
+    console.error('Error getting user profile:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get user profile' }));
+  }
+}
+
+// Get user conversations
+async function getUserConversationsEndpoint(req, res, userId) {
+  try {
+    const conversations = await getUserConversations(userId, 50);
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      conversations,
+      totalConversations: conversations.length
+    }));
+  } catch (error) {
+    console.error('Error getting user conversations:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get user conversations' }));
+  }
+}
+
+// Get conversation messages for a user
+async function getUserConversationMessages(req, res, conversationId, userId) {
+  try {
+    const messages = await getConversationMessages(conversationId, userId);
+    
+    // Get conversation details
+    const conversationDoc = await db.collection('users').doc(userId).collection('conversations').doc(conversationId).get();
+    const conversation = conversationDoc.exists ? { id: conversationDoc.id, ...conversationDoc.data() } : null;
+    
+    if (!conversation) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Conversation not found' }));
+      return;
+    }
+    
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      conversation,
+      messages,
+      messageCount: messages.length
+    }));
+  } catch (error) {
+    console.error('Error getting conversation messages:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get conversation messages' }));
   }
 }
 
