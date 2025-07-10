@@ -58,6 +58,43 @@ interface ModelPricing {
   };
 }
 
+interface UserDetail {
+  user: AdminUser;
+  analytics: {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    totalRequests: number;
+    totalCost: number;
+    modelBreakdown: Array<{
+      model: string;
+      totalTokens: number;
+      inputTokens: number;
+      outputTokens: number;
+      totalRequests: number;
+      totalCost: number;
+    }>;
+    firstRequest: string;
+    lastRequest: string;
+    avgTokensPerRequest: number;
+  };
+  conversations: Array<{
+    id: string;
+    title: string;
+    messageCount: number;
+    tokenCount: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  billing?: {
+    subscriptionStatus: 'active' | 'inactive' | 'cancelled' | 'past_due';
+    plan: 'free' | 'premium' | 'enterprise';
+    nextBillingDate?: string;
+    totalSpent: number;
+    paymentMethod?: string;
+  };
+}
+
 interface TokenUsage {
   global: {
     totalTokens: number;
@@ -115,6 +152,9 @@ interface TokenUsage {
 
 const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
   const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'analytics' | 'pricing' | 'health'>('dashboard');
+  const [selectedUser, setSelectedUser] = useState<AdminUser | null>(null);
+  const [userDetails, setUserDetails] = useState<any>(null);
+  const [activeDetailTab, setActiveDetailTab] = useState<'overview' | 'analytics' | 'conversations' | 'billing' | 'support'>('overview');
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
@@ -245,6 +285,23 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
     await updatePricing(updatedPricing);
     setNewModel({ model: '', displayName: '', input: 0.00015, output: 0.0006 });
     setShowAddModel(false);
+  };
+
+  const fetchUserDetails = async (userId: string) => {
+    try {
+      const headers = await getAuthHeaders();
+      const response = await fetch(`${API_BASE}/admin/users/${userId}/details`, { headers });
+      if (!response.ok) throw new Error('Failed to fetch user details');
+      const data = await response.json();
+      setUserDetails(data.userDetail);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to fetch user details');
+    }
+  };
+
+  const viewUserDetails = async (user: AdminUser) => {
+    setSelectedUser(user);
+    await fetchUserDetails(user.uid);
   };
 
   const createUser = async (e: React.FormEvent) => {
@@ -624,6 +681,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
                     <td>{formatDate(user.creationTime)}</td>
                     <td>{user.lastSignInTime ? formatDate(user.lastSignInTime) : '—'}</td>
                     <td className="actions">
+                      <button onClick={() => viewUserDetails(user)} className="view-button">View</button>
                       <button onClick={() => setEditingUser(user)}>Edit</button>
                       {!user.isAdmin && (
                         <button 
@@ -638,6 +696,250 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {selectedUser && userDetails && (
+        <div className="user-detail-overlay">
+          <div className="user-detail-modal">
+            <div className="user-detail-header">
+              <button 
+                className="back-button"
+                onClick={() => {setSelectedUser(null); setUserDetails(null);}}
+              >
+                ← Back to Users
+              </button>
+              <div className="user-detail-title">
+                <h2>{selectedUser.email}</h2>
+                <div className="user-detail-badges">
+                  <span className={`tier-badge ${selectedUser.tier}`}>
+                    {selectedUser.tier}
+                  </span>
+                  {selectedUser.isAdmin && <span className="admin-badge">Admin</span>}
+                  <span className={`status-badge ${selectedUser.disabled ? 'disabled' : 'active'}`}>
+                    {selectedUser.disabled ? 'Disabled' : 'Active'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="user-detail-tabs">
+              <button 
+                className={`detail-tab ${activeDetailTab === 'overview' ? 'active' : ''}`}
+                onClick={() => setActiveDetailTab('overview')}
+              >
+                Overview
+              </button>
+              <button 
+                className={`detail-tab ${activeDetailTab === 'analytics' ? 'active' : ''}`}
+                onClick={() => setActiveDetailTab('analytics')}
+              >
+                Analytics
+              </button>
+              <button 
+                className={`detail-tab ${activeDetailTab === 'conversations' ? 'active' : ''}`}
+                onClick={() => setActiveDetailTab('conversations')}
+              >
+                Conversations
+              </button>
+              <button 
+                className={`detail-tab ${activeDetailTab === 'billing' ? 'active' : ''}`}
+                onClick={() => setActiveDetailTab('billing')}
+              >
+                Billing
+              </button>
+              <button 
+                className={`detail-tab ${activeDetailTab === 'support' ? 'active' : ''}`}
+                onClick={() => setActiveDetailTab('support')}
+              >
+                Support
+              </button>
+            </div>
+
+            <div className="user-detail-content">
+              {/* Overview Tab */}
+              {activeDetailTab === 'overview' && (
+                <div className="detail-section">
+                  <h3>Account Information</h3>
+                  <div className="detail-grid">
+                    <div className="detail-card">
+                      <div className="detail-label">Display Name</div>
+                      <div className="detail-value">{selectedUser.displayName || '—'}</div>
+                    </div>
+                    <div className="detail-card">
+                      <div className="detail-label">Created</div>
+                      <div className="detail-value">{formatDate(selectedUser.creationTime)}</div>
+                    </div>
+                    <div className="detail-card">
+                      <div className="detail-label">Last Sign In</div>
+                      <div className="detail-value">
+                        {selectedUser.lastSignInTime ? formatDate(selectedUser.lastSignInTime) : '—'}
+                      </div>
+                    </div>
+                    <div className="detail-card">
+                      <div className="detail-label">Account Status</div>
+                      <div className="detail-value">
+                        <span className={`status-badge ${selectedUser.disabled ? 'disabled' : 'active'}`}>
+                          {selectedUser.disabled ? 'Disabled' : 'Active'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Analytics Tab */}
+              {activeDetailTab === 'analytics' && userDetails.analytics && (
+                <div className="detail-section">
+                  <h3>Usage Analytics</h3>
+                  <div className="detail-stats-grid">
+                    <div className="detail-stat-card">
+                      <div className="detail-stat-number">{userDetails.analytics.totalTokens.toLocaleString()}</div>
+                      <div className="detail-stat-label">Total Tokens</div>
+                    </div>
+                    <div className="detail-stat-card">
+                      <div className="detail-stat-number">{userDetails.analytics.totalRequests.toLocaleString()}</div>
+                      <div className="detail-stat-label">Total Requests</div>
+                    </div>
+                    <div className="detail-stat-card">
+                      <div className="detail-stat-number">${userDetails.analytics.totalCost.toFixed(4)}</div>
+                      <div className="detail-stat-label">Total Cost</div>
+                    </div>
+                    <div className="detail-stat-card">
+                      <div className="detail-stat-number">{userDetails.analytics.avgTokensPerRequest}</div>
+                      <div className="detail-stat-label">Avg Tokens/Request</div>
+                    </div>
+                  </div>
+
+                  {/* Model Breakdown */}
+                  {userDetails.analytics.modelBreakdown && userDetails.analytics.modelBreakdown.length > 0 && (
+                    <div className="model-breakdown-section">
+                      <h4>Model Usage Breakdown</h4>
+                      <div className="model-breakdown-table">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>Model</th>
+                              <th>Tokens</th>
+                              <th>Requests</th>
+                              <th>Cost</th>
+                              <th>Usage %</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {userDetails.analytics.modelBreakdown.map((model: any) => (
+                              <tr key={model.model}>
+                                <td>
+                                  <div>
+                                    <strong>{formatModelName(model.model)}</strong>
+                                    <div className="model-meta">{model.model}</div>
+                                  </div>
+                                </td>
+                                <td>{model.totalTokens.toLocaleString()}</td>
+                                <td>{model.totalRequests.toLocaleString()}</td>
+                                <td>${model.totalCost.toFixed(4)}</td>
+                                <td>
+                                  <span className="usage-percentage">
+                                    {((model.totalTokens / userDetails.analytics.totalTokens) * 100).toFixed(1)}%
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Conversations Tab */}
+              {activeDetailTab === 'conversations' && (
+                <div className="detail-section">
+                  <h3>Recent Conversations</h3>
+                  {userDetails.conversations && userDetails.conversations.length > 0 ? (
+                    <div className="conversations-list">
+                      {userDetails.conversations.slice(0, 10).map((conversation: any) => (
+                        <div key={conversation.id} className="conversation-item">
+                          <div className="conversation-info">
+                            <div className="conversation-title">{conversation.title || 'Untitled Conversation'}</div>
+                            <div className="conversation-meta">
+                              {conversation.messageCount} messages • {conversation.tokenCount} tokens
+                            </div>
+                          </div>
+                          <div className="conversation-date">
+                            {formatDate(conversation.updatedAt)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="no-data">
+                      <p>No conversations found for this user.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Billing Tab */}
+              {activeDetailTab === 'billing' && (
+                <div className="detail-section">
+                  <h3>Billing & Payments</h3>
+                  <div className="billing-placeholder">
+                    <div className="billing-info">
+                      <p><strong>Current Plan:</strong> {selectedUser.tier.charAt(0).toUpperCase() + selectedUser.tier.slice(1)}</p>
+                      <p><strong>Estimated Monthly Cost:</strong> ${(userDetails.analytics?.totalCost || 0 * 30).toFixed(2)}</p>
+                      <p><strong>Total Usage Cost:</strong> ${userDetails.analytics?.totalCost?.toFixed(4) || '0.0000'}</p>
+                    </div>
+                    <div className="billing-actions">
+                      <button className="billing-button disabled" disabled>
+                        Manage Subscription (Coming Soon)
+                      </button>
+                      <button className="billing-button disabled" disabled>
+                        View Payment History (Coming Soon)
+                      </button>
+                      <button className="billing-button disabled" disabled>
+                        Update Payment Method (Coming Soon)
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Support Tab */}
+              {activeDetailTab === 'support' && (
+                <div className="detail-section">
+                  <h3>Support Actions</h3>
+                  <div className="support-actions">
+                    <button 
+                      className="support-button"
+                      onClick={() => {
+                        const updatedUser = { ...selectedUser, tier: selectedUser.tier === 'free' ? 'premium' : 'free' as 'free' | 'premium' };
+                        setEditingUser(updatedUser);
+                      }}
+                    >
+                      {selectedUser.tier === 'free' ? 'Upgrade to Premium' : 'Downgrade to Free'}
+                    </button>
+                    <button 
+                      className="support-button"
+                      onClick={() => {
+                        const updatedUser = { ...selectedUser, disabled: !selectedUser.disabled };
+                        setEditingUser(updatedUser);
+                      }}
+                    >
+                      {selectedUser.disabled ? 'Enable Account' : 'Disable Account'}
+                    </button>
+                    <button className="support-button disabled" disabled>
+                      Send Support Email (Coming Soon)
+                    </button>
+                    <button className="support-button disabled" disabled>
+                      Issue Refund (Coming Soon)
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
