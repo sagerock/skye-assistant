@@ -25,13 +25,20 @@ const RealtimeInterface = () => {
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [conversationMode, setConversationMode] = useState<'continuous' | 'push-to-talk'>('continuous');
+  const [isPushToTalkActive, setIsPushToTalkActive] = useState(false);
+  const [isAIResponding, setIsAIResponding] = useState(false);
+  const isAIRespondingRef = useRef<boolean>(false);
+  const conversationModeRef = useRef<'continuous' | 'push-to-talk'>('continuous');
+  const isPushToTalkActiveRef = useRef<boolean>(false);
   
   const ws = useRef<WebSocket | null>(null);
   const audioContext = useRef<AudioContext | null>(null);
   const connectionInitialized = useRef<boolean>(false);
   const analyser = useRef<AnalyserNode | null>(null);
-  const vadThreshold = useRef<number>(0.01); // Voice activity detection threshold
+  const [vadThreshold, setVadThreshold] = useState<number>(0.01); // Voice activity detection threshold
   const silenceTimeout = useRef<NodeJS.Timeout | null>(null);
+  const isPushToTalkPressed = useRef<boolean>(false);
+  const pttReleaseTimeout = useRef<NodeJS.Timeout | null>(null);
   let nextStartTime = 0;
 
   const addMessage = (type: Message['type'], content: string) => {
@@ -93,7 +100,7 @@ const RealtimeInterface = () => {
     
     setAudioLevel(rms);
     
-    const isCurrentlySpeaking = rms > vadThreshold.current;
+    const isCurrentlySpeaking = rms > vadThreshold;
     
     if (isCurrentlySpeaking !== isUserSpeaking) {
       setIsUserSpeaking(isCurrentlySpeaking);
@@ -201,6 +208,8 @@ const RealtimeInterface = () => {
             setStatus('Listening...');
           } else if (data.type === 'speech_stopped') {
             setStatus('Processing...');
+            setIsAIResponding(true);
+            isAIRespondingRef.current = true;
           } else if (data.type === 'transcription') {
             addMessage('user', data.text);
           } else if (data.type === 'audio_response') {
@@ -216,10 +225,14 @@ const RealtimeInterface = () => {
             });
           } else if (data.type === 'response_complete') {
             setStatus('Connected. Start talking.');
+            setIsAIResponding(false);
+            isAIRespondingRef.current = false;
           } else if (data.type === 'session_ended') {
             addMessage('system', data.message);
             setStatus('Session ended.');
             setStatusClass('');
+            setIsAIResponding(false);
+            isAIRespondingRef.current = false;
           } else if (data.type === 'session_terminated') {
             addMessage('system', `Session terminated: ${data.message}`);
             if (data.reason === 'duration_limit') {
@@ -268,6 +281,46 @@ const RealtimeInterface = () => {
 
     connect();
 
+    // Add keyboard event listeners for Push to Talk
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.code === 'Space' && conversationModeRef.current === 'push-to-talk' && !event.repeat) {
+        console.log('⌨️ Space key pressed - activating PTT');
+        event.preventDefault();
+        if (!isPushToTalkPressed.current) {
+          isPushToTalkPressed.current = true;
+          setIsPushToTalkActive(true);
+          isPushToTalkActiveRef.current = true;
+          setStatus('🎤 Push to Talk active - speak now');
+        }
+      }
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.code === 'Space' && conversationModeRef.current === 'push-to-talk') {
+        console.log('⌨️ Space key released - deactivating PTT');
+        event.preventDefault();
+        isPushToTalkPressed.current = false;
+        setIsPushToTalkActive(false);
+        isPushToTalkActiveRef.current = false;
+        
+        // Clear any existing timeout before setting a new one
+        if (pttReleaseTimeout.current) {
+          clearTimeout(pttReleaseTimeout.current);
+        }
+        
+        // Send silence for 1000ms after PTT release to help OpenAI detect speech end
+        pttReleaseTimeout.current = setTimeout(() => {
+          pttReleaseTimeout.current = null;
+          console.log('🔇 PTT silence period ended');
+        }, 1000);
+        
+        setStatus('💬 Press and hold Space or PTT button to speak');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
     // Cleanup on unmount
     return () => {
       console.log('Cleaning up WebSocket connection');
@@ -281,12 +334,28 @@ const RealtimeInterface = () => {
       if ((window as any).audioProcessor) {
         (window as any).audioProcessor.disconnect();
       }
+      
+      // Remove keyboard event listeners
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      
+      // Clear PTT timeout
+      if (pttReleaseTimeout.current) {
+        clearTimeout(pttReleaseTimeout.current);
+        pttReleaseTimeout.current = null;
+      }
     };
   }, []);
 
   const handleStartSession = async () => {
     if (ws.current?.readyState !== WebSocket.OPEN) {
       addMessage('system', 'Connection not ready. Please wait.');
+      return;
+    }
+    
+    // Check if session is already active
+    if (isSessionActive) {
+      console.log('⚠️ Session already active, skipping start');
       return;
     }
 
@@ -330,8 +399,36 @@ const RealtimeInterface = () => {
           // Perform voice activity detection
           const isSpeaking = analyzeAudioLevel(inputBuffer);
           
-          // Send all audio for now (we'll optimize later once OpenAI is working)
-          if (conversationMode === 'continuous') {
+          // Send audio based on conversation mode (using refs to get current values)
+          // In PTT mode, send audio when active OR during brief silence period after release
+          // BUT NOT when AI is responding (to avoid conflicts)
+          const shouldSendAudio = !isAIRespondingRef.current && (
+            conversationModeRef.current === 'continuous' || 
+            (conversationModeRef.current === 'push-to-talk' && 
+             (isPushToTalkActiveRef.current || pttReleaseTimeout.current !== null))
+          );
+          
+          // Send silence (zeros) during release period in PTT mode
+          if (conversationModeRef.current === 'push-to-talk' && pttReleaseTimeout.current !== null && !isPushToTalkActiveRef.current) {
+            // Clear the audio buffer with silence and add some low-level noise to help VAD
+            inputBuffer.fill(0);
+            // Add very low-level white noise to help OpenAI VAD detect the "end of speech"
+            for (let i = 0; i < inputBuffer.length; i += 100) {
+              inputBuffer[i] = (Math.random() - 0.5) * 0.001; // Very quiet noise
+            }
+            console.log('🔇 PTT: Sending silence to end speech');
+          }
+          
+          // Debug logging for PTT
+          if (conversationModeRef.current === 'push-to-talk') {
+            if (isPushToTalkActiveRef.current) {
+              console.log('🎵 PTT: Sending audio data');
+            } else if (isAIRespondingRef.current) {
+              console.log('🚫 PTT: Blocked - AI is responding');
+            }
+          }
+          
+          if (shouldSendAudio) {
             // Convert float32 to PCM16
             const pcm16Buffer = new Int16Array(inputBuffer.length);
             for (let i = 0; i < inputBuffer.length; i++) {
@@ -424,6 +521,12 @@ const RealtimeInterface = () => {
             {!isUserSpeaking && !isAISpeaking && conversationMode === 'continuous' && (
               <div className="tip">💬 Just start speaking naturally</div>
             )}
+            {conversationMode === 'push-to-talk' && !isPushToTalkActive && (
+              <div className="tip">🎤 Hold Space or PTT button to speak</div>
+            )}
+            {conversationMode === 'push-to-talk' && isPushToTalkActive && (
+              <div className="tip">🔴 Recording - release to send</div>
+            )}
           </div>
         </div>
       )}
@@ -510,35 +613,46 @@ const RealtimeInterface = () => {
             <div className="mode-toggle">
               <button 
                 className={`mode-btn ${conversationMode === 'continuous' ? 'active' : ''}`}
-                onClick={() => setConversationMode('continuous')}
+                onClick={() => {
+                  setConversationMode('continuous');
+                  conversationModeRef.current = 'continuous';
+                }}
               >
                 🎤 Smart Voice Detection
               </button>
               <button 
                 className={`mode-btn ${conversationMode === 'push-to-talk' ? 'active' : ''}`}
-                onClick={() => setConversationMode('push-to-talk')}
+                onClick={() => {
+                  console.log('🔄 Switching to Push to Talk mode');
+                  setConversationMode('push-to-talk');
+                  conversationModeRef.current = 'push-to-talk';
+                  // Reset AI responding state when switching modes
+                  setIsAIResponding(false);
+                  isAIRespondingRef.current = false;
+                }}
               >
-                🔘 Push to Talk (Coming Soon)
+                🔘 Push to Talk
               </button>
             </div>
             <div className="mode-description">
               {conversationMode === 'continuous' 
                 ? "AI detects when you speak and manages turn-taking automatically" 
-                : "Hold a button while speaking (feature coming soon)"}
+                : "Hold Space key or PTT button while speaking"}
             </div>
           </div>
 
-          <div className="setting-group">
-            <label htmlFor="voice-sensitivity">Voice Sensitivity:</label>
+          {conversationMode === 'continuous' && (
+            <div className="setting-group">
+              <label htmlFor="voice-sensitivity">Voice Sensitivity:</label>
             <input 
               type="range" 
               id="voice-sensitivity"
               min="0.001" 
               max="0.1" 
               step="0.001"
-              value={vadThreshold.current}
+              value={vadThreshold}
               onChange={(e) => {
-                vadThreshold.current = parseFloat(e.target.value);
+                setVadThreshold(parseFloat(e.target.value));
               }}
             />
             <div className="sensitivity-labels">
@@ -546,7 +660,66 @@ const RealtimeInterface = () => {
               <span>Normal</span>
               <span>Less Sensitive</span>
             </div>
-          </div>
+            </div>
+          )}
+          
+          {conversationMode === 'push-to-talk' && (
+            <div className="setting-group">
+              <label>Push to Talk Controls:</label>
+              <div className="ptt-controls">
+                <button 
+                  className={`ptt-button ${isPushToTalkActive ? 'active' : ''}`}
+                  onMouseDown={() => {
+                    console.log('🎤 PTT Button pressed - activating');
+                    setIsPushToTalkActive(true);
+                    isPushToTalkActiveRef.current = true;
+                    setStatus('🎤 Push to Talk active - speak now');
+                  }}
+                  onMouseUp={() => {
+                    console.log('🎤 PTT Button released - deactivating');
+                    setIsPushToTalkActive(false);
+                    isPushToTalkActiveRef.current = false;
+                    
+                    // Clear any existing timeout before setting a new one
+                    if (pttReleaseTimeout.current) {
+                      clearTimeout(pttReleaseTimeout.current);
+                    }
+                    
+                    // Send silence for 1000ms after PTT release to help OpenAI detect speech end
+                    pttReleaseTimeout.current = setTimeout(() => {
+                      pttReleaseTimeout.current = null;
+                      console.log('🔇 PTT silence period ended');
+                    }, 1000);
+                    
+                    setStatus('💬 Press and hold Space or PTT button to speak');
+                  }}
+                  onMouseLeave={() => {
+                    setIsPushToTalkActive(false);
+                    isPushToTalkActiveRef.current = false;
+                    
+                    // Clear any existing timeout before setting a new one
+                    if (pttReleaseTimeout.current) {
+                      clearTimeout(pttReleaseTimeout.current);
+                    }
+                    
+                    // Send silence for 1000ms after PTT release to help OpenAI detect speech end
+                    pttReleaseTimeout.current = setTimeout(() => {
+                      pttReleaseTimeout.current = null;
+                      console.log('🔇 PTT silence period ended');
+                    }, 1000);
+                    
+                    setStatus('💬 Press and hold Space or PTT button to speak');
+                  }}
+                >
+                  {isPushToTalkActive ? '🔴 Recording' : '🎤 Hold to Talk'}
+                </button>
+                <div className="ptt-help">
+                  <p>• Hold this button to speak</p>
+                  <p>• Or press and hold <kbd>Space</kbd> key</p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {isSessionActive && (
             <div className="setting-group">
@@ -560,6 +733,13 @@ const RealtimeInterface = () => {
                 </div>
                 <span className="level-text">{(audioLevel * 1000).toFixed(1)}%</span>
               </div>
+              {conversationMode === 'push-to-talk' && (
+                <div className="ptt-status">
+                  <span className={`ptt-indicator ${isPushToTalkActive ? 'active' : ''}`}>
+                    {isPushToTalkActive ? '🔴 PTT Active' : '⚫ PTT Inactive'}
+                  </span>
+                </div>
+              )}
             </div>
           )}
         </div>
