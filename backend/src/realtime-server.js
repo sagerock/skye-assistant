@@ -702,16 +702,57 @@ async function getUserConversations(userId, limit = 20) {
 // Get messages for a specific conversation (user-organized)
 async function getConversationMessages(conversationId, userId, limit = 100) {
   try {
+    // Get conversation details to check for sessionId
+    const conversationDoc = await db.collection('users').doc(userId).collection('conversations').doc(conversationId).get();
+    const conversation = conversationDoc.exists ? conversationDoc.data() : null;
+    
+    let messages = [];
+    
+    // Try searching by conversationId first (without orderBy to avoid index requirement)
     const messagesSnapshot = await db.collection('users').doc(userId).collection('messages')
       .where('conversationId', '==', conversationId)
-      .orderBy('timestamp', 'asc')
       .limit(limit)
       .get();
     
-    const messages = [];
     messagesSnapshot.forEach(doc => {
-      messages.push({ id: doc.id, ...doc.data() });
+      const data = doc.data();
+      messages.push({ id: doc.id, ...data });
     });
+    
+    // If no messages found, try to find messages by sessionId
+    if (messages.length === 0 && conversation?.metadata?.sessionId) {
+      const sessionId = conversation.metadata.sessionId;
+      
+      try {
+        const sessionMessagesSnapshot = await db.collection('users').doc(userId).collection('messages')
+          .where('sessionId', '==', sessionId)
+          .limit(limit)
+          .get();
+        
+        sessionMessagesSnapshot.forEach(doc => {
+          const data = doc.data();
+          messages.push({ id: doc.id, ...data });
+        });
+      } catch (sessionError) {
+        console.error(`Error searching by sessionId: ${sessionError.message}`);
+      }
+    }
+    
+    // If still no messages, try the conversation subcollection
+    if (messages.length === 0) {
+      try {
+        const convMessagesSnapshot = await db.collection('users').doc(userId).collection('conversations').doc(conversationId).collection('messages')
+          .limit(limit)
+          .get();
+        
+        convMessagesSnapshot.forEach(doc => {
+          const data = doc.data();
+          messages.push({ id: doc.id, ...data });
+        });
+      } catch (convError) {
+        console.error(`Error searching conversation subcollection: ${convError.message}`);
+      }
+    }
     
     return messages;
   } catch (error) {

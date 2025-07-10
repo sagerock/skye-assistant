@@ -244,6 +244,16 @@ body {
   color: #212529;
 }
 
+.activity-list {
+  width: 100%;
+}
+
+.activity-list p {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  color: #6c757d;
+}
+
 .activity-item {
   display: flex;
   justify-content: space-between;
@@ -431,6 +441,13 @@ body {
   font-size: 10px;
   color: #6c757d;
   text-align: right;
+}
+
+.no-messages {
+  text-align: center;
+  padding: 40px 20px;
+  color: #6c757d;
+  font-style: italic;
 }
 
 /* Analytics Tab */

@@ -65,6 +65,9 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
         if (profileData.profile) {
           const profile = profileData.profile;
           
+          console.log('📊 Raw conversations data:', profile.conversations);
+          console.log('📊 First conversation sample:', JSON.stringify(profile.conversations?.[0], null, 2));
+          
           setUserTier(profile.user.tier);
           setUserStats({
             ...profile.analytics,
@@ -77,7 +80,8 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
             tier: profile.user.tier,
             conversations: profile.conversations?.length || 0,
             totalMessages: profile.conversations?.reduce((sum: number, conv: any) => sum + (conv.messageCount || 0), 0) || 0,
-            analytics: profile.analytics
+            analytics: profile.analytics,
+            conversationsArray: profile.conversations
           });
         } else {
           console.warn('⚠️ No profile data in response');
@@ -108,6 +112,8 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
         const data = await response.json();
         setConversationMessages(data.messages || []);
         setSelectedConversation(conversationId);
+      } else {
+        console.error(`Failed to load messages: ${response.status}`);
       }
     } catch (error) {
       console.error('Error loading conversation messages:', error);
@@ -118,31 +124,60 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
     if (!timestamp) return 'Unknown';
     
     let date;
-    if (timestamp.toDate) {
-      date = timestamp.toDate();
-    } else if (timestamp._seconds) {
-      date = new Date(timestamp._seconds * 1000);
-    } else {
-      date = new Date(timestamp);
+    try {
+      if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+        // Firestore Timestamp object
+        date = timestamp.toDate();
+      } else if (timestamp._seconds) {
+        // Firestore Timestamp-like object
+        date = new Date(timestamp._seconds * 1000);
+      } else if (timestamp.seconds) {
+        // Alternative Firestore timestamp format
+        date = new Date(timestamp.seconds * 1000);
+      } else if (typeof timestamp === 'string' || typeof timestamp === 'number') {
+        // Regular date string or number
+        date = new Date(timestamp);
+      } else {
+        // Unknown format, try to convert
+        date = new Date(timestamp);
+      }
+      
+      if (isNaN(date.getTime())) {
+        return 'Invalid Date';
+      }
+      
+      return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch (error) {
+      console.error('Error formatting date:', error, timestamp);
+      return 'Date Error';
     }
-    
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
   };
 
   const formatDuration = (startTime: any, endTime: any) => {
     if (!startTime || !endTime) return 'Unknown';
     
     let start, end;
-    if (startTime.toDate) {
-      start = startTime.toDate();
-      end = endTime.toDate();
-    } else {
-      start = new Date(startTime);
-      end = new Date(endTime);
+    try {
+      if (startTime.toDate && typeof startTime.toDate === 'function') {
+        start = startTime.toDate();
+        end = endTime.toDate();
+      } else if (startTime._seconds) {
+        start = new Date(startTime._seconds * 1000);
+        end = new Date(endTime._seconds * 1000);
+      } else if (startTime.seconds) {
+        start = new Date(startTime.seconds * 1000);
+        end = new Date(endTime.seconds * 1000);
+      } else {
+        start = new Date(startTime);
+        end = new Date(endTime);
+      }
+      
+      const duration = Math.round((end.getTime() - start.getTime()) / 60000); // minutes
+      return duration > 0 ? `${duration} min` : '< 1 min';
+    } catch (error) {
+      console.error('Error formatting duration:', error, startTime, endTime);
+      return 'Duration Error';
     }
-    
-    const duration = Math.round((end.getTime() - start.getTime()) / 60000); // minutes
-    return `${duration} min`;
   };
 
   const getTierBadgeClass = (tier: string) => {
@@ -242,22 +277,6 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
               </div>
             </div>
 
-            <div className="recent-activity">
-              <h3>Recent Conversations</h3>
-              {conversations.slice(0, 5).map(conv => (
-                <div key={conv.id} className="activity-item" onClick={() => loadConversationMessages(conv.id)}>
-                  <div className="activity-info">
-                    <h4>{conv.title || 'Untitled Conversation'}</h4>
-                    <p>{formatDate(conv.startTime)} • {conv.messageCount} messages</p>
-                  </div>
-                  <div className="activity-meta">
-                    <span className={`model-badge ${conv.model.includes('gpt-4o-mini') ? 'mini' : 'standard'}`}>
-                      {conv.model.includes('gpt-4o-mini') ? 'Mini' : 'GPT-4o'}
-                    </span>
-                  </div>
-                </div>
-              ))}
-            </div>
           </div>
         )}
 
@@ -273,50 +292,60 @@ const UserProfile = ({ user, onBack }: UserProfileProps) => {
                   <h3>Conversation Details</h3>
                 </div>
                 <div className="messages-container">
-                  {conversationMessages.map((message, index) => (
-                    <div key={index} className={`message ${message.role}`}>
-                      <div className="message-header">
-                        <span className="role">{message.role === 'user' ? 'You' : 'Skye'}</span>
-                        <span className="timestamp">{formatDate(message.timestamp)}</span>
-                      </div>
-                      <div className="message-content">{message.content}</div>
-                      {message.tokens && (
-                        <div className="message-tokens">
-                          Tokens: {(message.tokens.input || 0) + (message.tokens.output || 0)}
-                        </div>
-                      )}
+                  {conversationMessages.length === 0 ? (
+                    <div className="no-messages">
+                      No messages found for this conversation
                     </div>
-                  ))}
+                  ) : (
+                    conversationMessages.map((message, index) => (
+                      <div key={index} className={`message ${message.role}`}>
+                        <div className="message-header">
+                          <span className="role">{message.role === 'user' ? 'You' : 'Skye'}</span>
+                          <span className="timestamp">{formatDate(message.timestamp)}</span>
+                        </div>
+                        <div className="message-content">{message.content}</div>
+                        {message.tokens && (
+                          <div className="message-tokens">
+                            Tokens: {(message.tokens.input || 0) + (message.tokens.output || 0)}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
                 </div>
               </div>
             ) : (
               <div className="conversations-list">
                 <h3>All Conversations ({conversations.length})</h3>
-                <div className="conversations-grid">
-                  {conversations.map(conv => (
-                    <div key={conv.id} className="conversation-card" onClick={() => loadConversationMessages(conv.id)}>
-                      <div className="conversation-info">
-                        <h4>{conv.title || 'Untitled Conversation'}</h4>
-                        <p className="conversation-date">{formatDate(conv.startTime)}</p>
-                        <div className="conversation-stats">
-                          <span>{conv.messageCount} messages</span>
-                          {conv.totalTokens && <span>• {conv.totalTokens} tokens</span>}
-                          {conv.startTime && conv.endTime && (
-                            <span>• {formatDuration(conv.startTime, conv.endTime)}</span>
-                          )}
+                {conversations.length === 0 ? (
+                  <p>No conversations found. Start a conversation to see it here!</p>
+                ) : (
+                  <div className="conversations-grid">
+                    {conversations.map((conv, index) => (
+                      <div key={conv.id} className="conversation-card" onClick={() => loadConversationMessages(conv.id)}>
+                        <div className="conversation-info">
+                          <h4>{conv.title || conv.metadata?.title || `Conversation ${index + 1}`}</h4>
+                          <p className="conversation-date">{formatDate(conv.startTime)}</p>
+                          <div className="conversation-stats">
+                            <span>{conv.messageCount || 0} messages</span>
+                            {conv.totalTokens && <span>• {conv.totalTokens} tokens</span>}
+                            {conv.startTime && conv.endTime && (
+                              <span>• {formatDuration(conv.startTime, conv.endTime)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="conversation-meta">
+                          <span className={`model-badge ${conv.model?.includes('gpt-4o-mini') ? 'mini' : 'standard'}`}>
+                            {conv.model?.includes('gpt-4o-mini') ? 'Mini' : 'GPT-4o'}
+                          </span>
+                          <span className={`status-badge ${conv.status || 'completed'}`}>
+                            {conv.status || 'completed'}
+                          </span>
                         </div>
                       </div>
-                      <div className="conversation-meta">
-                        <span className={`model-badge ${conv.model.includes('gpt-4o-mini') ? 'mini' : 'standard'}`}>
-                          {conv.model.includes('gpt-4o-mini') ? 'Mini' : 'GPT-4o'}
-                        </span>
-                        <span className={`status-badge ${conv.status || 'completed'}`}>
-                          {conv.status || 'completed'}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
