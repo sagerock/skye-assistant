@@ -373,7 +373,12 @@ async function getTokenAnalyticsFromFirestore() {
           const pricing = modelPricing[model] || { input: 0.00015, output: 0.0006 }; // Default to mini pricing
           const inputCost = ((eventData.inputTokens || 0) / 1000) * pricing.input;
           const outputCost = ((eventData.outputTokens || 0) / 1000) * pricing.output;
-          userModelData.totalCost += inputCost + outputCost;
+          const eventCost = inputCost + outputCost;
+          userModelData.totalCost += eventCost;
+          
+          if (eventCost > 0) {
+            console.log(`💰 Cost tracking: ${eventData.email || 'unknown'} | Model: ${model} | In: ${eventData.inputTokens}($${inputCost.toFixed(4)}) Out: ${eventData.outputTokens}($${outputCost.toFixed(4)}) Total: $${eventCost.toFixed(4)}`);
+          }
         }
         
         // Track sessions
@@ -844,6 +849,10 @@ async function handleAdminRequest(req, res, url) {
       await getUsers(req, res);
     } else if (url.pathname === '/admin/users' && req.method === 'POST') {
       await createUser(req, res);
+    } else if (url.pathname.startsWith('/admin/users/') && url.pathname.endsWith('/details') && req.method === 'GET') {
+      const userId = url.pathname.split('/')[3];
+      console.log('🔍 User details request for:', userId);
+      await getUserDetails(req, res, userId);
     } else if (url.pathname.startsWith('/admin/users/') && req.method === 'PUT') {
       const userId = url.pathname.split('/')[3];
       await updateUser(req, res, userId);
@@ -857,6 +866,10 @@ async function handleAdminRequest(req, res, url) {
     } else if (url.pathname === '/admin/tokens' && req.method === 'GET') {
       await getTokenStats(req, res);
     } else if (url.pathname === '/admin/usage' && req.method === 'GET') {
+      await getUsageAnalytics(req, res);
+    } else if (url.pathname === '/debug/cost-analytics' && req.method === 'GET') {
+      // Temporary debug endpoint without authentication
+      console.log('🔍 Debug: Fetching cost analytics...');
       await getUsageAnalytics(req, res);
     } else if (url.pathname === '/admin/conversations' && req.method === 'GET') {
       await getConversationStats(req, res);
@@ -1141,6 +1154,7 @@ async function getUsageAnalytics(req, res) {
     }).sort((a, b) => b.totalCost - a.totalCost);
     
     // Calculate cost breakdown by model
+    
     const costByModel = (analytics.modelBreakdown || []).map(model => {
       const pricing = modelPricing[model.model] || { input: 0.00015, output: 0.0006 };
       const inputCost = (model.inputTokens / 1000) * pricing.input;
@@ -1167,6 +1181,7 @@ async function getUsageAnalytics(req, res) {
         avgCostPerUser: totalCost / Math.max(analytics.global.uniqueUsers || 1, 1)
       }
     };
+    
     
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ usage }));
@@ -1325,6 +1340,175 @@ async function updatePricing(req, res) {
     console.error('Error updating pricing:', error);
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to update pricing configuration' }));
+  }
+}
+
+async function getUserDetails(req, res, userId) {
+  try {
+    console.log('🔍 Getting details for user:', userId);
+    
+    // Get user from Firebase
+    let userRecord;
+    try {
+      const auth = getAuth();
+      userRecord = await auth.getUser(userId);
+    } catch (userError) {
+      console.error('Error getting user from Firebase:', userError);
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'User not found' }));
+      return;
+    }
+    
+    const user = {
+      uid: userRecord.uid,
+      email: userRecord.email,
+      displayName: userRecord.displayName,
+      creationTime: userRecord.metadata.creationTime,
+      lastSignInTime: userRecord.metadata.lastSignInTime,
+      disabled: userRecord.disabled,
+      tier: getUserTier(userRecord.email),
+      isAdmin: ADMIN_USERS.has(userRecord.email),
+      isPremium: PREMIUM_USERS.has(userRecord.email)
+    };
+
+    // Get user analytics from token usage events
+    let userAnalytics = {
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalRequests: 0,
+      totalCost: 0,
+      modelBreakdown: [],
+      firstRequest: null,
+      lastRequest: null,
+      avgTokensPerRequest: 0
+    };
+
+    try {
+      // Get token usage events for this user - simplified query
+      let eventsSnapshot;
+      try {
+        eventsSnapshot = await db.collection('analytics')
+          .doc('token_usage')
+          .collection('events')
+          .where('userId', '==', userId)
+          .limit(100)
+          .get();
+      } catch (queryError) {
+        console.warn('Failed to query analytics events, using empty result:', queryError.message);
+        eventsSnapshot = { docs: [] };
+      }
+
+      const modelUsage = new Map();
+      let firstRequestTime = null;
+      let lastRequestTime = null;
+
+      eventsSnapshot.forEach(doc => {
+        const eventData = doc.data();
+        const model = eventData.model || 'unknown';
+        
+        // Track model usage
+        if (!modelUsage.has(model)) {
+          modelUsage.set(model, {
+            model,
+            totalTokens: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            totalRequests: 0,
+            totalCost: 0
+          });
+        }
+        
+        const modelData = modelUsage.get(model);
+        modelData.totalTokens += eventData.totalTokens || 0;
+        modelData.inputTokens += eventData.inputTokens || 0;
+        modelData.outputTokens += eventData.outputTokens || 0;
+        modelData.totalRequests += 1;
+        
+        // Calculate cost
+        const pricing = modelPricing[model] || { input: 0.00015, output: 0.0006 };
+        const inputCost = ((eventData.inputTokens || 0) / 1000) * pricing.input;
+        const outputCost = ((eventData.outputTokens || 0) / 1000) * pricing.output;
+        modelData.totalCost += inputCost + outputCost;
+        
+        // Update user totals
+        userAnalytics.totalTokens += eventData.totalTokens || 0;
+        userAnalytics.inputTokens += eventData.inputTokens || 0;
+        userAnalytics.outputTokens += eventData.outputTokens || 0;
+        userAnalytics.totalRequests += 1;
+        userAnalytics.totalCost += inputCost + outputCost;
+        
+        // Track request times
+        if (eventData.timestamp) {
+          const eventTime = safeTimestampToISO(eventData.timestamp);
+          if (!firstRequestTime || eventTime < firstRequestTime) firstRequestTime = eventTime;
+          if (!lastRequestTime || eventTime > lastRequestTime) lastRequestTime = eventTime;
+        }
+      });
+
+      userAnalytics.modelBreakdown = Array.from(modelUsage.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+      userAnalytics.firstRequest = firstRequestTime;
+      userAnalytics.lastRequest = lastRequestTime;
+      userAnalytics.avgTokensPerRequest = userAnalytics.totalRequests > 0 ? 
+        Math.round(userAnalytics.totalTokens / userAnalytics.totalRequests) : 0;
+
+    } catch (analyticsError) {
+      console.warn('Error getting user analytics:', analyticsError.message);
+      console.error('Analytics error details:', analyticsError);
+    }
+
+    // Get user conversations
+    let conversations = [];
+    try {
+      let conversationsSnapshot;
+      try {
+        conversationsSnapshot = await db.collection('users')
+          .doc(userId)
+          .collection('conversations')
+          .limit(10)
+          .get();
+      } catch (queryError) {
+        console.warn('Failed to query conversations, using empty result:', queryError.message);
+        conversationsSnapshot = { docs: [] };
+      }
+
+      conversations = conversationsSnapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          title: data.title || 'Untitled Conversation',
+          messageCount: data.messageCount || 0,
+          tokenCount: data.tokenCount || 0,
+          createdAt: safeTimestampToISO(data.createdAt) || new Date().toISOString(),
+          updatedAt: safeTimestampToISO(data.updatedAt) || new Date().toISOString()
+        };
+      });
+    } catch (conversationError) {
+      console.warn('Error getting user conversations:', conversationError.message);
+      console.error('Conversation error details:', conversationError);
+    }
+
+    // Prepare billing info (placeholder for future payment gateway integration)
+    const billing = {
+      subscriptionStatus: user.tier === 'premium' ? 'active' : 'inactive',
+      plan: user.tier,
+      totalSpent: userAnalytics.totalCost,
+      // nextBillingDate, paymentMethod would come from payment gateway
+    };
+
+    const userDetail = {
+      user,
+      analytics: userAnalytics,
+      conversations,
+      billing
+    };
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ userDetail }));
+  } catch (error) {
+    console.error('Error getting user details:', error);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Failed to get user details' }));
   }
 }
 
@@ -1865,11 +2049,13 @@ Remember to reference previous conversations naturally and build on established 
           // TRACK TOKEN USAGE FROM OPENAI EVENTS
           if (event.type === 'response.done' && event.response && event.response.usage) {
             const usage = event.response.usage;
+            const currentModel = userSession.model || selectedModel || 'unknown';
+            console.log(`🔍 Tracking tokens for model: ${currentModel}`);
             trackTokenUsage(
               userSession.uid,
               userSession.email,
               userSession.sessionId,
-              selectedModel,
+              currentModel,
               usage.input_tokens || 0,
               usage.output_tokens || 0,
               'response.done'
@@ -1884,6 +2070,7 @@ Remember to reference previous conversations naturally and build on established 
           
           // Also track token usage from input audio transcription events
           if (event.type === 'conversation.item.input_audio_transcription.completed' && event.usage) {
+            console.log(`🔍 Tracking tokens for Whisper transcription`);
             trackTokenUsage(
               userSession.uid,
               userSession.email,
@@ -1903,11 +2090,13 @@ Remember to reference previous conversations naturally and build on established 
           
           // Track usage from response generation events
           if (event.type === 'response.output_item.done' && event.usage) {
+            const currentModel = userSession.model || selectedModel || 'unknown';
+            console.log(`🔍 Tracking tokens for response output: ${currentModel}`);
             trackTokenUsage(
               userSession.uid,
               userSession.email,
               userSession.sessionId,
-              selectedModel,
+              currentModel,
               event.usage.input_tokens || 0,
               event.usage.output_tokens || 0,
               'response.output_item.done'

@@ -966,7 +966,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
               </div>
               {tokenUsage.costs && (
                 <div className="stat-card premium">
-                  <div className="stat-number">${tokenUsage.costs.totalCost.toFixed(2)}</div>
+                  <div className="stat-number">${tokenUsage.costs.totalCost.toFixed(4)}</div>
                   <div className="stat-label">Total Cost</div>
                 </div>
               )}
@@ -1111,15 +1111,15 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ user, onBack }) => {
               <h3>Cost Analytics</h3>
               <div className="stats-grid">
                 <div className="stat-card">
-                  <div className="stat-number">${tokenUsage.costs.avgCostPerToken.toFixed(6)}</div>
-                  <div className="stat-label">Avg Cost per Token</div>
+                  <div className="stat-number">${(tokenUsage.costs.avgCostPerToken * 1000).toFixed(4)}</div>
+                  <div className="stat-label">Avg Cost per 1K Tokens</div>
                 </div>
                 <div className="stat-card">
                   <div className="stat-number">${tokenUsage.costs.avgCostPerRequest.toFixed(4)}</div>
                   <div className="stat-label">Avg Cost per Request</div>
                 </div>
                 <div className="stat-card">
-                  <div className="stat-number">${tokenUsage.costs.avgCostPerUser.toFixed(2)}</div>
+                  <div className="stat-number">${tokenUsage.costs.avgCostPerUser.toFixed(4)}</div>
                   <div className="stat-label">Avg Cost per User</div>
                 </div>
               </div>
